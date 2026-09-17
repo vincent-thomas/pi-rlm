@@ -59,12 +59,12 @@ export PI_RLM_SMART_MODEL=provider/model-id
 
 A requested `routine` tier falls back to `smart`, then to the selected agi model; `smart` falls back to agi. Configured models must be available and, when pi model scoping is active, included in that scope.
 
-Use routine for tightly specified summarization, localization, extraction, classification, formatting, and simple evidence checks. Tell it the exact scope, desired output, and what not to infer. Use smart for bounded multi-step analysis. Use agi freely where stronger judgment helps, while staying token-economical by sending high-volume retrieval to routine. For example, routine can locate CI errors and return nearby lines, then agi can diagnose the cause and propose the fix:
+This is model guidance, not an automatic runtime router. Use deterministic code for counting, filtering, exact search, comparison, and formatting; keep small tasks local. Delegate only when expected gains in accuracy, context management, or useful parallelism outweigh setup, latency, and cost. Use routine for bounded semantic extraction or classification, smart for bounded multi-step reasoning, and agi directly for ambiguity, conflicting evidence, or consequential judgments—no routine attempt is required first. Children should solve their scope locally unless further delegation materially helps. Each delegation must specify the objective, scope, output format, evidence requirements, and stopping rule. Verify the evidence and escalate on conflicts or failed checks, rather than relying on self-reported confidence. For example, delegate bounded semantic extraction:
 
 ```js
-const passages = await llm_query(
-  'Locate discussion of retries. Return exact quotes and offsets; do not synthesize.',
-  context,
+const claims = await llm_query(
+  'Extract reasons users distrust the proposed rollout from this excerpt only. Return a JSON array of { reason, quote } with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.',
+  state.rolloutExcerpt,
   { model: 'routine' },
 );
 ```

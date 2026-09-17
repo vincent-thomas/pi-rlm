@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { Runtime } from '../src/runtime.ts';
-import { createQuery } from '../src/rlm.ts';
+import { createQuery, instructions } from '../src/rlm.ts';
 
 const runtimes: Runtime[] = [];
 function runtime(context = '') {
@@ -77,7 +77,9 @@ test('child model tiers default to routine and explicit tiers are forwarded', as
 
 test('createQuery passes the requested tier to model completion', async () => {
   let seen = '';
-  const query = createQuery(process.cwd(), async (_ctx, _signal, tier) => {
+  const query = createQuery(process.cwd(), async (ctx, _signal, tier) => {
+    expect(ctx.systemPrompt).toContain(instructions);
+    expect(ctx.systemPrompt).toContain('Children should solve their assigned scope locally');
     seen = tier;
     return response([{ type: 'text', text: 'done' }]);
   });
@@ -113,4 +115,14 @@ test('depth and model turn limits fail explicitly', async () => {
   const complete = async () => response([{ type: 'toolCall', id: '1', name: 'exec', arguments: { code: 'print(1)' } }]);
   await expect(createQuery(process.cwd(), complete, { remaining: 1 }, 2)('', '', new AbortController().signal)).rejects.toThrow('depth limit');
   await expect(createQuery(process.cwd(), complete)('', '', new AbortController().signal)).rejects.toThrow('8 model turns');
+});
+
+test('routing guidance prioritizes code and task difficulty over delegation', () => {
+  expect(instructions).toContain('Use deterministic JavaScript or shell commands');
+  expect(instructions).toContain('Keep small tasks local');
+  expect(instructions).toContain('outweigh setup, latency, and cost');
+  expect(instructions).toContain('no routine attempt is required');
+  expect(instructions).toContain('evidence requirements, and stopping rule');
+  expect(instructions).toContain('Check returned evidence against sources');
+  expect(instructions).not.toContain("Use 'routine' aggressively");
 });
