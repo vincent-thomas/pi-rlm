@@ -18,6 +18,6 @@ export function readLimits(): Limits {
   return {
     execTimeoutMs: read('PI_RLM_EXEC_TIMEOUT_MS', 1_800_000, 0, 2_147_483_647),
     requestTimeoutMs: read('PI_RLM_REQUEST_TIMEOUT_MS', 300_000, 0, 2_147_483_647),
-    maxCalls: read('PI_RLM_MAX_CALLS', 100, 1, Number.MAX_SAFE_INTEGER),
+    maxCalls: read('PI_RLM_MAX_CALLS', 1000, 1, Number.MAX_SAFE_INTEGER),
   };
 }

@@ -101,7 +101,7 @@ Logs remain available after resets and child completion, until explicitly delete
 
 ## Limits and lifecycle
 
-- Two child levels; by default, 100 child calls shared across all descendants of each root `exec` (`PI_RLM_MAX_CALLS`).
+- Two child levels; by default, 1,000 child calls shared across all descendants of each root `exec` (`PI_RLM_MAX_CALLS`).
 - Eight model turns per child; at most 4096 output tokens per model response.
 - Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
@@ -116,7 +116,7 @@ Bash runs with your user's permissions; the worker is **not a security sandbox**
 | --- | --- | --- |
 | `PI_RLM_EXEC_TIMEOUT_MS` | `1800000` (30 min) | Whole-cell deadline, including all child work; `0` disables |
 | `PI_RLM_REQUEST_TIMEOUT_MS` | `300000` (5 min) | Timeout for each child model response; `0` disables |
-| `PI_RLM_MAX_CALLS` | `100` | Positive child-call budget shared across descendants per root cell |
+| `PI_RLM_MAX_CALLS` | `1000` | Positive child-call budget shared across descendants per root cell |
 
 Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-child turn/output limits remain unchanged.
 

@@ -28,11 +28,11 @@ const answer = (): AssistantMessage => ({ role: 'assistant', content: [{ type: '
 
 test('limits have workflow defaults and explicit opt-out', () => {
   for (const name of names) delete process.env[name];
-  expect(readLimits()).toEqual({ execTimeoutMs: 1800000, requestTimeoutMs: 300000, maxCalls: 100 });
+  expect(readLimits()).toEqual({ execTimeoutMs: 1800000, requestTimeoutMs: 300000, maxCalls: 1000 });
   process.env.PI_RLM_EXEC_TIMEOUT_MS = '0';
   process.env.PI_RLM_REQUEST_TIMEOUT_MS = '0';
-  process.env.PI_RLM_MAX_CALLS = '25';
-  expect(readLimits()).toEqual({ execTimeoutMs: 0, requestTimeoutMs: 0, maxCalls: 25 });
+  process.env.PI_RLM_MAX_CALLS = '2500';
+  expect(readLimits()).toEqual({ execTimeoutMs: 0, requestTimeoutMs: 0, maxCalls: 2500 });
 });
 
 test('invalid limits fail explicitly rather than overflowing timers', () => {
