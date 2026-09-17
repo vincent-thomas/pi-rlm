@@ -8,15 +8,32 @@ export interface ExecResult { text: string; isError: boolean }
 export class Runtime {
   private worker?: Worker;
   private cancel?: (reason: string) => void;
+  private termination: Promise<void> = Promise.resolve();
   constructor(private cwd: string, private context = '') {}
+
+  private terminate(worker: Worker) {
+    if (this.worker === worker) this.worker = undefined;
+    const stopped = worker.terminate().then(() => undefined, () => undefined);
+    this.termination = Promise.all([this.termination, stopped]).then(() => undefined);
+  }
+
+  private async waitForTermination() {
+    while (true) {
+      const pending = this.termination;
+      await pending;
+      if (pending === this.termination) return;
+    }
+  }
 
   dispose() {
     this.cancel?.('JavaScript workspace reset.');
-    void this.worker?.terminate();
-    this.worker = undefined;
+    if (this.worker) this.terminate(this.worker);
   }
 
   async exec(code: string, query: Query, signal?: AbortSignal, timeoutMs = 120_000): Promise<ExecResult> {
+    if (this.cancel) throw new Error('An exec cell is already running.');
+    if (signal?.aborted) throw new Error('Execution aborted.');
+    await this.waitForTermination();
     if (this.cancel) throw new Error('An exec cell is already running.');
     if (signal?.aborted) throw new Error('Execution aborted.');
     const worker = this.worker ??= new Worker(new URL('./worker.mjs', import.meta.url), {
@@ -35,7 +52,7 @@ export class Runtime {
         worker.off('exit', onExit);
         this.cancel = undefined;
         controller.abort();
-        if (reset) { void worker.terminate(); this.worker = undefined; }
+        if (reset) this.terminate(worker);
         resolve(result);
       };
       const abort = () => finish({ text: 'Execution aborted; workspace reset.', isError: true }, true);
