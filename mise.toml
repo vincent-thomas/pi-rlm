@@ -1,2 +1,8 @@
 [tools]
 bun = "latest"
+
+[deps.bun]
+auto = true
+
+[tasks.start]
+run = "bun --bun node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js -ne -e ./index.ts"

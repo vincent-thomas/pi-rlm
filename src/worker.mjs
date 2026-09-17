@@ -23,7 +23,7 @@ function request(type, args) {
   return result;
 }
 const sandbox = createContext({
-  state: {}, context: workerData.context, print,
+  state: {}, resultsPath: undefined, context: workerData.context, print,
   // Node's vm provides a console by default; explicitly remove it.
   console: undefined,
   readFile: async (path, len = 16000, offset = 0) => {
@@ -54,6 +54,7 @@ const sandbox = createContext({
 });
 parentPort.on('message', async message => {
   if (message.type === 'queryResult' || message.type === 'bashResult') {
+    if (message.resultsPath) sandbox.resultsPath = message.resultsPath;
     const waiter = pending.get(message.id);
     pending.delete(message.id);
     if (message.error) waiter?.reject(new Error(message.error));
@@ -61,6 +62,7 @@ parentPort.on('message', async message => {
     return;
   }
   if (message.type !== 'exec') return;
+  sandbox.resultsPath = message.resultsPath;
   output = ''; truncated = false;
   try {
     await new Script(`(async () => {\n${message.code}\n})()`, { filename: 'rlm-exec.js' }).runInContext(sandbox);
