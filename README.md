@@ -40,13 +40,34 @@ A later cell can delegate selected chunks:
 
 ```js
 state.answers = await Promise.all([
-  llm_query('Extract claims and supporting quotes.', state.document.slice(0, 20000)),
-  llm_query('Extract claims and supporting quotes.', state.document.slice(20000, 40000)),
+  llm_query('Extract claims and exact supporting quotes; do not infer.', state.document.slice(0, 20000), { model: 'routine' }),
+  llm_query('Extract claims and exact supporting quotes; do not infer.', state.document.slice(20000, 40000), { model: 'routine' }),
 ]);
 print(state.answers);
 ```
 
 Each child has its own JavaScript workspace and receives the supplied text in `context`. It can inspect that text with `exec` and recursively delegate further. Only its final answer returns to the parent.
+
+### Model tiers
+
+The model selected in pi is the top-level **agi** tier. Configure optional lower tiers with exact model references:
+
+```sh
+export PI_RLM_ROUTINE_MODEL=provider/model-id
+export PI_RLM_SMART_MODEL=provider/model-id
+```
+
+A requested `routine` tier falls back to `smart`, then to the selected agi model; `smart` falls back to agi. Configured models must be available and, when pi model scoping is active, included in that scope.
+
+Use routine for tightly specified summarization, localization, extraction, classification, formatting, and simple evidence checks. Tell it the exact scope, desired output, and what not to infer. Use smart for bounded multi-step analysis. Use agi freely where stronger judgment helps, while staying token-economical by sending high-volume retrieval to routine. For example, routine can locate CI errors and return nearby lines, then agi can diagnose the cause and propose the fix:
+
+```js
+const passages = await llm_query(
+  'Locate discussion of retries. Return exact quotes and offsets; do not synthesize.',
+  context,
+  { model: 'routine' },
+);
+```
 
 ## JavaScript globals
 
@@ -57,7 +78,7 @@ Each child has its own JavaScript workspace and receives the supplied text in `c
 | `print(...)` | Explicitly send values to the model |
 | `await bash(command)` | Run Bash; return only `{ exitCode, stdoutPath, stderrPath }` |
 | `await readFile(path, len = 16000, offset = 0)` | Read a bounded UTF-8 slice; length and offset are in bytes |
-| `await llm_query(prompt, contextText)` | Query a child RLM; both arguments are strings |
+| `await llm_query(prompt, contextText, { model })` | Query a child RLM using `routine`, `smart`, or `agi`; defaults to `routine` |
 
 Use `state.name = value` to retain values. Local `let`, `const`, and `var` declarations are cell-local. Only `print()` emits values; cell return values are ignored. Execution errors are reported automatically. Await all asynchronous work before ending a cell. `console`, `fs`, `require`, and `cwd` are not exposed as REPL helpers.
 

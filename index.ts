@@ -4,7 +4,7 @@ import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
-import { createQuery, instructions, parameters } from './src/rlm.ts';
+import { createQuery, instructions, parameters, type ModelTier } from './src/rlm.ts';
 
 export default function rlm(pi: ExtensionAPI) {
   let runtime: Runtime | undefined;
@@ -33,9 +33,27 @@ export default function rlm(pi: ExtensionAPI) {
     async execute(_id, { code }, signal, _update, ctx) {
       runtime ??= new Runtime(ctx.cwd);
       const model = ctx.model;
-      const query = createQuery(ctx.cwd, async (conversation, childSignal) => {
-        if (!model) throw new Error('Select a model before calling llm_query.');
-        return ctx.modelRegistry.complete(model, conversation, { signal: childSignal, maxTokens: 4096 });
+      const query = createQuery(ctx.cwd, async (conversation, childSignal, tier: ModelTier) => {
+        if (!model) throw new Error('Select an AGI/top-level model before calling llm_query.');
+        const available = ctx.scopedModels.length
+          ? ctx.scopedModels.map(item => item.model)
+          : ctx.modelRegistry.getAvailable();
+        const findConfigured = (reference: string) => {
+          const exact = available.filter(candidate =>
+            `${candidate.provider}/${candidate.id}` === reference || candidate.id === reference);
+          if (exact.length !== 1) {
+            const detail = exact.length ? 'is ambiguous' : 'is unavailable';
+            throw new Error(`Configured RLM model ${reference} ${detail}. Use an exact provider/model id and ensure it is in scope.`);
+          }
+          return exact[0]!;
+        };
+        let childModel = model; // The selected top-level model is always the AGI tier.
+        const references = tier === 'routine'
+          ? [process.env.PI_RLM_ROUTINE_MODEL, process.env.PI_RLM_SMART_MODEL]
+          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL] : [];
+        const reference = references.find(value => value?.trim())?.trim();
+        if (reference) childModel = findConfigured(reference);
+        return ctx.modelRegistry.complete(childModel, conversation, { signal: childSignal, maxTokens: 4096 });
       });
       const result = await runtime.exec(code, query, signal);
       if (result.isError) throw new Error(result.text);
@@ -46,7 +64,7 @@ export default function rlm(pi: ExtensionAPI) {
   pi.on('session_tree', reset);
   pi.on('session_shutdown', reset);
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level; delegate precise local work to lower tiers.\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',

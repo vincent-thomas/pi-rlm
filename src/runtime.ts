@@ -1,7 +1,8 @@
 import { Worker } from 'node:worker_threads';
 import { bash } from './bash.ts';
+import type { QueryOptions } from './rlm.ts';
 
-export type Query = (prompt: string, context: string, signal: AbortSignal) => Promise<string>;
+export type Query = (prompt: string, context: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
 export interface ExecResult { text: string; isError: boolean }
 
 /** A terminable worker keeps runaway JavaScript from blocking pi's event loop. */
@@ -65,7 +66,7 @@ export class Runtime {
           try {
             const result = message.type === 'bash'
               ? await bash(message.command, this.cwd, controller.signal)
-              : await query(message.prompt, message.context, controller.signal);
+              : await query(message.prompt, message.context, controller.signal, message.options);
             if (!done) worker.postMessage({ type, id: message.id, result });
           } catch (error) {
             if (!done) worker.postMessage({ type, id: message.id, error: String(error) });

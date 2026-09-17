@@ -41,11 +41,15 @@ const sandbox = createContext({
     } finally { activeReads--; }
   },
   bash: command => request('bash', { command }),
-  llm_query: (prompt, context = '') => {
+  llm_query: (prompt, context = '', options = {}) => {
     if (typeof prompt !== 'string' || typeof context !== 'string') {
-      return Promise.reject(new Error('llm_query(prompt, context) requires strings'));
+      return Promise.reject(new Error('llm_query(prompt, context, options) requires prompt and context strings'));
     }
-    return request('query', { prompt, context });
+    if (options === null || typeof options !== 'object' || Array.isArray(options) ||
+        (options.model !== undefined && !['routine', 'smart', 'agi'].includes(options.model))) {
+      return Promise.reject(new Error("llm_query options.model must be 'routine', 'smart', or 'agi'"));
+    }
+    return request('query', { prompt, context, options: { model: options.model ?? 'routine' } });
   },
 });
 parentPort.on('message', async message => {

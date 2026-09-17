@@ -62,6 +62,29 @@ test('parallel child results are correlated correctly', async () => {
   const result = await runtime().exec('state.answers = await Promise.all([llm_query("a", "one"), llm_query("b", "two")]); print(state.answers.join(","))', async (p, c) => p + c);
   expect(result.text).toBe('aone,btwo\n');
 });
+test('child model tiers default to routine and explicit tiers are forwarded', async () => {
+  const seen: string[] = [];
+  const result = await runtime().exec(
+    `print(await llm_query("localize", "one")); print(await llm_query("synthesize", "two", { model: "agi" }))`,
+    async (_prompt, _context, _signal, options) => {
+      seen.push(options?.model ?? 'missing');
+      return options?.model ?? 'missing';
+    },
+  );
+  expect(result.text).toBe('routine\nagi\n');
+  expect(seen).toEqual(['routine', 'agi']);
+});
+
+test('createQuery passes the requested tier to model completion', async () => {
+  let seen = '';
+  const query = createQuery(process.cwd(), async (_ctx, _signal, tier) => {
+    seen = tier;
+    return response([{ type: 'text', text: 'done' }]);
+  });
+  expect(await query('verify', 'evidence', new AbortController().signal, { model: 'smart' })).toBe('done');
+  expect(seen).toBe('smart');
+});
+
 test('child context stays outside the model prompt and can be inspected with exec', async () => {
   let count = 0;
   const query = createQuery(process.cwd(), async (ctx: Context) => {
