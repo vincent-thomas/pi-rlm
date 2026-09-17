@@ -1,0 +1,39 @@
+{
+  "name": "pi-rlm",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/js-beautify": "^1.14.3",
+    "@types/node": "^22.20.3",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "typebox": "^1.3.33"
+  },
+  "description": "A recursive language model extension for pi with a JavaScript exec workspace",
+  "version": "0.1.0",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "rlm"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test",
+    "start": "bun --bun node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js -e ./index.ts"
+  },
+  "dependencies": {
+    "js-beautify": "^2.0.3"
+  }
+}

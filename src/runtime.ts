@@ -1,0 +1,67 @@
+import { Worker } from 'node:worker_threads';
+import { bash } from './bash.ts';
+
+export type Query = (prompt: string, context: string, signal: AbortSignal) => Promise<string>;
+export interface ExecResult { text: string; isError: boolean }
+
+/** A terminable worker keeps runaway JavaScript from blocking pi's event loop. */
+export class Runtime {
+  private worker?: Worker;
+  private cancel?: (reason: string) => void;
+  constructor(private cwd: string, private context = '') {}
+
+  dispose() {
+    this.cancel?.('JavaScript workspace reset.');
+    void this.worker?.terminate();
+    this.worker = undefined;
+  }
+
+  async exec(code: string, query: Query, signal?: AbortSignal, timeoutMs = 120_000): Promise<ExecResult> {
+    if (this.cancel) throw new Error('An exec cell is already running.');
+    if (signal?.aborted) throw new Error('Execution aborted.');
+    const worker = this.worker ??= new Worker(new URL('./worker.mjs', import.meta.url), {
+      workerData: { cwd: this.cwd, context: this.context },
+    });
+    const controller = new AbortController();
+    return new Promise(resolve => {
+      let done = false;
+      const finish = (result: ExecResult, reset = false) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        worker.off('message', onMessage);
+        worker.off('error', onError);
+        worker.off('exit', onExit);
+        this.cancel = undefined;
+        controller.abort();
+        if (reset) { void worker.terminate(); this.worker = undefined; }
+        resolve(result);
+      };
+      const abort = () => finish({ text: 'Execution aborted; workspace reset.', isError: true }, true);
+      const onError = (error: Error) => finish({ text: error.message, isError: true }, true);
+      const onExit = (code: number) => finish({ text: `Worker exited (${code}); workspace reset.`, isError: true }, true);
+      const onMessage = async (message: any) => {
+        if (message.type === 'result') finish({ text: message.text || '(no output)', isError: message.isError }, message.reset);
+        if (message.type === 'query' || message.type === 'bash') {
+          const type = message.type === 'bash' ? 'bashResult' : 'queryResult';
+          try {
+            const result = message.type === 'bash'
+              ? await bash(message.command, this.cwd, controller.signal)
+              : await query(message.prompt, message.context, controller.signal);
+            if (!done) worker.postMessage({ type, id: message.id, result });
+          } catch (error) {
+            if (!done) worker.postMessage({ type, id: message.id, error: String(error) });
+          }
+        }
+      };
+      const timer = setTimeout(() => finish({ text: 'Execution timed out; workspace reset.', isError: true }, true), timeoutMs);
+      this.cancel = reason => finish({ text: reason, isError: true }, true);
+      signal?.addEventListener('abort', abort, { once: true });
+      worker.on('message', onMessage);
+      worker.on('error', onError);
+      worker.on('exit', onExit);
+      worker.postMessage({ type: 'exec', code });
+    });
+  }
+}
