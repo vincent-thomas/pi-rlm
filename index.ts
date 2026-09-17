@@ -64,7 +64,7 @@ export default function rlm(pi: ExtensionAPI) {
   pi.on('session_tree', reset);
   pi.on('session_shutdown', reset);
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level; delegate precise local work to lower tiers.\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level. Delegate bounded work only when it materially helps; choose tiers by task difficulty.\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',
