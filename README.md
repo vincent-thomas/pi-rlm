@@ -75,6 +75,7 @@ const claims = await llm_query(
 | --- | --- |
 | `context` | Text loaded with `/rlm-load`, or supplied by the parent |
 | `state` | Persistent object shared between cells in this workspace |
+| `resultsPath` | Completed child-result journal path, initially undefined; survives worker resets |
 | `print(...)` | Explicitly send values to the model |
 | `await bash(command)` | Run Bash; return only `{ exitCode, stdoutPath, stderrPath }` |
 | `await readFile(path, len = 16000, offset = 0)` | Read a bounded UTF-8 slice; length and offset are in bytes |
@@ -100,14 +101,32 @@ Logs remain available after resets and child completion, until explicitly delete
 
 ## Limits and lifecycle
 
-- Two child levels; 12 child calls shared across all descendants of each root `exec`.
+- Two child levels; by default, 1,000 child calls shared across all descendants of each root `exec` (`PI_RLM_MAX_CALLS`).
 - Eight model turns per child; at most 4096 output tokens per model response.
-- Two-minute deadline per `exec`, including child calls. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
+- Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
 - `/rlm-reset` clears the workspace. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
 - Timeouts and cancellation discard workspace state; the original loaded `context` is restored in the replacement worker.
 
 Bash runs with your user's permissions; the worker is **not a security sandbox**. On Unix, cancellation kills the active shell's process group. Processes that deliberately detach may survive, and filesystem or other external effects are not rolled back. Recursive requests incur the selected provider's normal usage and are bounded per `exec`, not per conversation. Child transcripts are not added to pi's main session history.
+
+### Workflow configuration
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `PI_RLM_EXEC_TIMEOUT_MS` | `1800000` (30 min) | Whole-cell deadline, including all child work; `0` disables |
+| `PI_RLM_REQUEST_TIMEOUT_MS` | `300000` (5 min) | Timeout for each child model response; `0` disables |
+| `PI_RLM_MAX_CALLS` | `1000` | Positive child-call budget shared across descendants per root cell |
+
+Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-child turn/output limits remain unchanged.
+
+### Recovering completed results
+
+Each workspace journals successful child answers before returning them to JavaScript. The `resultsPath` global is initially undefined, then holds an absolute JSONL path in a private temporary directory. Records contain an ID, task prompt, requested model tier, answer, and completion timestamp—not the supplied context. Concurrent completions are serialized into separate records.
+
+On timeout or cancellation, the error includes the journal path if available. A replacement worker in the same runtime can read `resultsPath` with `readFile(resultsPath)`. This is **not** automatic replay or a checkpoint of arbitrary `state`; in-memory state is still discarded. Journals remain on disk after reset/session changes, but the new session does not automatically rediscover them. Save the path if needed. Nested workspaces have their own journals.
+
+Journals may contain sensitive prompts and answers. They are not automatically deleted and remain until explicitly removed or cleaned by the OS, like shell logs.
 
 ## Development
 
