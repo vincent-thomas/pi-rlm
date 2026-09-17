@@ -135,3 +135,19 @@ bun run check
 ```
 
 Tests use fake model responses to exercise actual worker execution, state, recursive tool loops, bounded file reads, shell logs, output limits, cancellation, and budgets without paid model calls.
+
+## Autonomous benchmark improvement (experimental)
+
+When a user gives a measurable optimization target such as “improve this benchmark by at least 10%,” the top-level agent can start the `start_long_horizon` tool automatically. The user does not create a project, issue continuation prompts, or manage checkpoints.
+
+The tool creates an isolated Git worktree and branch, then launches a detached supervisor. Each iteration starts a fresh Pi SDK session, asks it for one bounded change, runs the canonical verifier outside the model, and commits only a strict valid improvement. Regressions, correctness failures, edits to declared benchmark/correctness paths, and agent-created commits are reverted. The supervisor stops after independent verification reaches the target or its deadline/iteration budget expires.
+
+Durable job state and logs live under `~/.pi/agent/rlm-jobs/<job-id>/`; accepted changes live on the reported `rlm/<job-id>` branch. If Pi remains open, the extension reports completion automatically. Otherwise it reports completed jobs when a session for the source repository next starts.
+
+The verifier must be deterministic enough to compare runs and print exactly one JSON object:
+
+```json
+{"valid":true,"score":123.4,"summary":"tests passed"}
+```
+
+The feature currently assumes Git, Bun on `PATH`, configured Pi model credentials, and a maximize-style score. The detached supervisor survives the originating Pi session, but not a host reboot unless it is started again from its persisted state.

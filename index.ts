@@ -5,8 +5,10 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
 import { createQuery, instructions, parameters, type ModelTier } from './src/rlm.ts';
+import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
 
 export default function rlm(pi: ExtensionAPI) {
+  registerLongHorizon(pi);
   let runtime: Runtime | undefined;
   let contextLength = 0;
   const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; };
@@ -60,11 +62,11 @@ export default function rlm(pi: ExtensionAPI) {
       return { content: [{ type: 'text', text: result.text }], details: {} };
     },
   });
-  pi.on('session_start', () => { reset(); pi.setActiveTools(['exec']); });
+  pi.on('session_start', () => { reset(); pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']); });
   pi.on('session_tree', reset);
   pi.on('session_shutdown', reset);
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level. Delegate bounded work only when it materially helps; choose tiers by task difficulty.\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level. Delegate bounded work only when it materially helps; choose tiers by task difficulty.\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',
