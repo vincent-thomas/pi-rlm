@@ -29,12 +29,22 @@ test('errors are recoverable and output is capped', async () => {
   expect(output.text).toContain('truncated');
   expect((await repl.exec('print(42)', unused)).text).toBe('42\n');
 });
-test('infinite loops after await time out and reset state', async () => {
+test('timed-out workers terminate before replacement execution begins', async () => {
   const repl = runtime();
-  const result = await repl.exec('state.x = 1; await Promise.resolve(); while (true) {}', unused, undefined, 150);
-  expect(result.text).toContain('timed out');
-  expect((await repl.exec('print(typeof state.x)', unused)).text).toBe('undefined
-');
+  const timedOut = repl.exec('state.x = 1; await Promise.resolve(); while (true) {}', unused, undefined, 150);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const oldWorker = (repl as any).worker;
+  let oldWorkerExited = false;
+  oldWorker.once('exit', () => { oldWorkerExited = true; });
+  expect((await timedOut).text).toContain('timed out');
+
+  let oldWorkerStopped = false;
+  const replacement = await repl.exec('print(await llm_query("check")); print(typeof state.x)', async () => {
+    oldWorkerStopped = oldWorkerExited;
+    return 'ready';
+  });
+  expect(oldWorkerStopped).toBe(true);
+  expect(replacement.text).toBe('ready\nundefined\n');
 });
 test('cancellation propagates to in-flight child requests', async () => {
   const repl = runtime();
