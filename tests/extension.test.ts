@@ -11,6 +11,12 @@ test('pi loader registers tools and commands; loaded extension executes and rese
   expect([...extension.tools.keys()].sort()).toEqual(['exec', 'start_long_horizon']);
   const tool = extension.tools.get('exec')!.definition;
   const ctx = { cwd: process.cwd() } as ExtensionContext;
+  const source = 'const PRIVATE_ORCHESTRATION = 1;\nprint(PRIVATE_ORCHESTRATION);';
+  const collapsedCall = tool.renderCall!({ code: source }, undefined as never, { expanded: false } as never).render(120).join('\n');
+  expect(collapsedCall).toContain('JavaScript · 2 lines');
+  expect(collapsedCall).not.toContain('PRIVATE_ORCHESTRATION');
+  const expandedCall = tool.renderCall!({ code: source }, undefined as never, { expanded: true } as never).render(120).join('\n');
+  expect(expandedCall).toContain('PRIVATE_ORCHESTRATION');
   try {
     for (const handler of extension.handlers.get('before_agent_start')!) {
       const prompt = await handler({ type: 'before_agent_start', prompt: 'task', systemPrompt: 'BASE' }, ctx);

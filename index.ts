@@ -22,7 +22,11 @@ export default function rlm(pi: ExtensionAPI) {
     name: 'exec', label: 'JavaScript',
     description: 'Execute JavaScript with persistent state, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context) calls. Use print() to show results.',
     parameters,
-    renderCall({ code }) {
+    renderCall({ code }, _theme, context) {
+      if (!context.expanded) {
+        const lines = code ? code.split(/\r?\n/).length : 0;
+        return new Text('JavaScript · ' + lines + ' line' + (lines === 1 ? '' : 's') + ' (Ctrl+O to view code)', 0, 0);
+      }
       const formatted = beautify(code ?? '', {
         indent_size: 2,
         wrap_line_length: 100,
