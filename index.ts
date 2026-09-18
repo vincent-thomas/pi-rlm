@@ -4,7 +4,7 @@ import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
-import { autonomyInstructions, createQuery, instructions, parameters, type ModelTier } from './src/rlm.ts';
+import { autonomyInstructions, createQuery, instructions, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
 import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
 
 export default function rlm(pi: ExtensionAPI) {
@@ -66,7 +66,7 @@ export default function rlm(pi: ExtensionAPI) {
   pi.on('session_tree', reset);
   pi.on('session_shutdown', reset);
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier. Keep global planning and final synthesis at this level. Delegate bounded work only when it materially helps; choose tiers by task difficulty.\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',

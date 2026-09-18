@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { Runtime } from '../src/runtime.ts';
-import { createQuery, instructions } from '../src/rlm.ts';
+import { childInstructions, createQuery, instructions, orchestrationInstructions } from '../src/rlm.ts';
 
 const runtimes: Runtime[] = [];
 function runtime(context = '') {
@@ -79,7 +79,9 @@ test('createQuery passes the requested tier to model completion', async () => {
   let seen = '';
   const query = createQuery(process.cwd(), async (ctx, _signal, tier) => {
     expect(ctx.systemPrompt).toContain(instructions);
-    expect(ctx.systemPrompt).toContain('Children should solve their assigned scope locally');
+    expect(ctx.systemPrompt).toContain(childInstructions);
+    expect(ctx.systemPrompt).toContain('Own and complete the assigned scope');
+    expect(ctx.systemPrompt).not.toContain(orchestrationInstructions);
     seen = tier;
     return response([{ type: 'text', text: 'done' }]);
   });
@@ -117,12 +119,15 @@ test('depth and model turn limits fail explicitly', async () => {
   await expect(createQuery(process.cwd(), complete)('', '', new AbortController().signal)).rejects.toThrow('8 model turns');
 });
 
-test('routing guidance prioritizes code and task difficulty over delegation', () => {
-  expect(instructions).toContain('Use deterministic JavaScript or shell commands');
-  expect(instructions).toContain('Keep small tasks local');
-  expect(instructions).toContain('outweigh setup, latency, and cost');
-  expect(instructions).toContain('no routine attempt is required');
-  expect(instructions).toContain('evidence requirements, and stopping rule');
-  expect(instructions).toContain('Check returned evidence against sources');
-  expect(instructions).not.toContain("Use 'routine' aggressively");
+test('routing guidance preserves top-tier attention through delegation', () => {
+  expect(orchestrationInstructions).toContain('not as the default worker');
+  expect(orchestrationInstructions).toContain('minimizing top-level context is a benefit in itself');
+  expect(orchestrationInstructions).toContain('mechanical changes');
+  expect(orchestrationInstructions).toContain('worker followed by an independent reviewer');
+  expect(orchestrationInstructions).toContain('Do not equate a task being easy');
+  expect(orchestrationInstructions).toContain('evidence requirements, and stopping rule');
+  expect(orchestrationInstructions).toContain('Check returned evidence against sources');
+  expect(childInstructions).toContain('Use deterministic JavaScript or shell commands');
+  expect(childInstructions).toContain('Own and complete the assigned scope');
+  expect(childInstructions).toContain('do not re-delegate merely because the work is semantic');
 });
