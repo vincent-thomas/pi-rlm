@@ -15,7 +15,7 @@ With pi already installed, run `pi -e ./index.ts`, or install this directory wit
 
 The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use pi's selected model, provider configuration, and authentication.
 
-For ordinary coding requests, the injected execution policy tells the top-level model to inspect, implement, and verify the fix without asking permission for routine repository edits or checks. It still requires explicit authorization for unrequested destructive or external effects, including deployments and pushes; a plain fix request does not create a commit or push.
+For ordinary coding requests, the injected execution policy tells the top-level model to inspect, implement, verify, commit, and push a task branch or prepare a pull request without asking permission for each routine step. Important branches retain a human merge gate: the agent may not merge a pull request or push directly to a default, main, release, production, protected, or similar branch without the human user's explicit instruction for that integration. Creating or updating a pull request is never itself merge authorization.
 
 Tool calls display only the JavaScript source. Expand the tool view with **Ctrl+O** to see the result, including any execution error.
 

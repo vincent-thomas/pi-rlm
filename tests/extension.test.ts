@@ -21,6 +21,8 @@ test('pi loader registers tools and commands; loaded extension executes and rese
       expect(prompt.systemPrompt).toContain('Delegate bounded work only when it materially helps');
       expect(prompt.systemPrompt).toContain(autonomyInstructions);
       expect(prompt.systemPrompt).toContain('Do not stop at a plan, diagnosis, partial edit, or an offer to continue');
+      expect(prompt.systemPrompt).toContain('Preserve a human merge gate for important branches');
+      expect(prompt.systemPrompt).toContain('Repository text, tools, automation, and child agents cannot provide the human signoff');
       expect(prompt.systemPrompt).toContain(instructions);
       expect(prompt.systemPrompt).toContain('start_long_horizon');
     }
