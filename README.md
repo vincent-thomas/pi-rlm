@@ -154,3 +154,7 @@ The verifier must be deterministic enough to compare runs and print exactly one 
 ```
 
 The feature currently assumes Git, Bun on `PATH`, configured Pi model credentials, and a maximize-style score. The detached supervisor survives the originating Pi session, but not a host reboot unless it is started again from its persisted state.
+
+## Live recursive activity
+
+While exec is running, its tool result shows a throttled live summary of recursive calls, model turns, exec phases, tool-call counts, hierarchy, outcomes, and durations. Expanding the tool view shows the activity tree followed by normal output. Updates contain metadata only: prompts, context, generated JavaScript, tool arguments and output, paths, errors, and child answers are never included, so the activity UI is not a transcript channel.

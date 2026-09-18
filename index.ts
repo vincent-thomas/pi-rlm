@@ -4,19 +4,29 @@ import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
+import { ActivityPublisher, ActivityUpdateSink, type ActivitySnapshot } from './src/activity.ts';
+import { formatActivity } from './src/render-activity.ts';
 import { autonomyInstructions, createQuery, instructions, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
 import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
+
+export interface RlmToolDetails { activity?: ActivitySnapshot }
+export { formatActivity };
 
 export default function rlm(pi: ExtensionAPI) {
   registerLongHorizon(pi);
   let runtime: Runtime | undefined;
   let contextLength = 0;
-  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; };
+  const activityByToolCall = new Map<string, ActivitySnapshot>();
+  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; activityByToolCall.clear(); };
   pi.registerTool({
     name: 'exec', label: 'JavaScript',
     description: 'Execute JavaScript with persistent state, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context) calls. Use print() to show results.',
     parameters,
-    renderCall({ code }) {
+    renderCall({ code }, _theme, context) {
+      if (!context.expanded) {
+        const lines = code ? code.split(/\r?\n/).length : 0;
+        return new Text('JavaScript · ' + lines + ' line' + (lines === 1 ? '' : 's') + ' (Ctrl+O to view code)', 0, 0);
+      }
       const formatted = beautify(code ?? '', {
         indent_size: 2,
         wrap_line_length: 100,
@@ -25,15 +35,21 @@ export default function rlm(pi: ExtensionAPI) {
       return new Text(highlightCode(formatted, 'javascript').join('\n'), 0, 0);
     },
     renderResult(result, { expanded }, theme, context) {
-      if (!expanded) return new Text('', 0, 0);
-      const output = result.content
-        .filter(block => block.type === 'text')
-        .map(block => block.text)
-        .join('\n');
-      return new Text(theme.fg(context.isError ? 'error' : 'toolOutput', output), 0, 0);
+      const output = result.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+      const activity = (result.details as RlmToolDetails | undefined)?.activity;
+      if (!activity) {
+        if (!expanded) return new Text(context.isError ? theme.fg('error', 'JavaScript failed') : '', 0, 0);
+        return new Text(theme.fg(context.isError ? 'error' : 'toolOutput', output), 0, 0);
+      }
+      let text = theme.fg(context.isError ? 'error' : 'muted', formatActivity(activity, expanded));
+      if (expanded && output) text += '\n\n' + theme.fg(context.isError ? 'error' : 'toolOutput', output);
+      return new Text(text, 0, 0);
     },
-    async execute(_id, { code }, signal, _update, ctx) {
+    async execute(toolCallId, { code }, signal, onUpdate, ctx) {
       runtime ??= new Runtime(ctx.cwd);
+      const updates = new ActivityUpdateSink(snapshot => onUpdate?.({ content: [], details: { activity: snapshot } }));
+      const activity = new ActivityPublisher(snapshot => { activityByToolCall.set(toolCallId, snapshot); updates.push(snapshot); });
+      activity.initial();
       const model = ctx.model;
       const query = createQuery(ctx.cwd, async (conversation, childSignal, tier: ModelTier) => {
         if (!model) throw new Error('Select an AGI/top-level model before calling llm_query.');
@@ -56,11 +72,25 @@ export default function rlm(pi: ExtensionAPI) {
         const reference = references.find(value => value?.trim())?.trim();
         if (reference) childModel = findConfigured(reference);
         return ctx.modelRegistry.complete(childModel, conversation, { signal: childSignal, maxTokens: 4096 });
-      });
-      const result = await runtime.exec(code, query, signal);
-      if (result.isError) throw new Error(result.text);
-      return { content: [{ type: 'text', text: result.text }], details: {} };
+      }, undefined, undefined, undefined, { reporter: activity });
+      try {
+        const result = await runtime.exec(code, query, signal);
+        if (result.isError) throw new Error(result.text);
+        return { content: [{ type: 'text', text: result.text }], details: { activity: activity.snapshot() } };
+      } finally {
+        const finalActivity = activity.snapshot();
+        activityByToolCall.set(toolCallId, finalActivity);
+        updates.finish(finalActivity);
+      }
     },
+  });
+  pi.on('tool_result', event => {
+    if (event.toolName !== 'exec') return;
+    const activity = activityByToolCall.get(event.toolCallId);
+    if (!activity) return;
+    activityByToolCall.delete(event.toolCallId);
+    const details = event.details && typeof event.details === 'object' ? event.details as Record<string, unknown> : {};
+    return { content: event.content, isError: event.isError, details: { ...details, activity } };
   });
   pi.on('session_start', () => { reset(); pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']); });
   pi.on('session_tree', reset);

@@ -2,6 +2,7 @@ import { readLimits } from './limits.ts';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { Runtime, type Query } from './runtime.ts';
+import type { ActivityContext, TerminalActivityStatus } from './activity.ts';
 
 export const parameters = Type.Object({ code: Type.String({ description: 'JavaScript with top-level await. Use state for persistent variables and print() for output.' }) });
 export type ModelTier = 'routine' | 'smart' | 'agi';
@@ -48,44 +49,55 @@ Return your final answer normally, grounded in inspected data. Workspaces are ep
 
 export type Complete = (context: Context, signal: AbortSignal, tier: ModelTier) => Promise<AssistantMessage>;
 export function createQuery(
-  cwd: string,
-  complete: Complete,
-  budget = { remaining: readLimits().maxCalls },
-  depth = 0,
-  maxTurns = readLimits().maxTurns,
+  cwd: string, complete: Complete, budget = { remaining: readLimits().maxCalls }, depth = 0,
+  maxTurns = readLimits().maxTurns, activity?: ActivityContext,
 ): Query {
   return async (prompt, context, signal, options = {}) => {
     const tier: ModelTier = options.model ?? 'routine';
-    signal.throwIfAborted();
-    if (depth >= 2) throw new Error('RLM recursion depth limit reached (2).');
-    if (budget.remaining <= 0) throw new Error('RLM child-call budget exhausted.');
-    budget.remaining--;
-    const runtime = new Runtime(cwd, context);
-    const conversation: Context = {
-      systemPrompt: instructions + '\n' + childInstructions + `\nYou are a ${tier}-tier child at depth ${depth + 1}, not the top-level model. context contains ${context.length} characters. Complete the narrowly specified delegated task; do not broaden its scope.`,
-      messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-      tools: [{ name: 'exec', description: 'Execute JavaScript in your persistent workspace.', parameters }],
-    };
+    const callId = activity?.reporter.start({ parentId: activity.parentId, depth: depth + 1, tier });
+    let terminal: TerminalActivityStatus = 'failed';
+    let runtime: Runtime | undefined;
     try {
+      signal.throwIfAborted();
+      if (depth >= 2) throw new Error('RLM recursion depth limit reached (2).');
+      if (budget.remaining <= 0) throw new Error('RLM child-call budget exhausted.');
+      budget.remaining--;
+      runtime = new Runtime(cwd, context);
+      const conversation: Context = {
+        systemPrompt: instructions + '\n' + childInstructions + '\nYou are a ' + tier + '-tier child at depth ' + (depth + 1) + ', not the top-level model. context contains ' + context.length + ' characters. Complete the narrowly specified delegated task; do not broaden its scope.',
+        messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
+        tools: [{ name: 'exec', description: 'Execute JavaScript in your persistent workspace.', parameters }],
+      };
+      let toolCalls = 0;
       for (let turn = 0; turn < maxTurns; turn++) {
         signal.throwIfAborted();
+        if (callId) activity?.reporter.model(callId, turn + 1);
         const response = await completeWithDeadline(complete, conversation, signal, tier);
         if (response.stopReason === 'error' || response.stopReason === 'aborted') {
+          if (response.stopReason === 'aborted') terminal = 'aborted';
           throw new Error(response.errorMessage || `Child model ${response.stopReason}`);
         }
         conversation.messages.push(response);
         const calls = response.content.filter(block => block.type === 'toolCall');
-        if (!calls.length) return response.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+        if (!calls.length) { terminal = 'succeeded'; return response.content.filter(block => block.type === 'text').map(block => block.text).join('\n'); }
         for (const call of calls) {
+          if (callId) activity?.reporter.exec(callId, ++toolCalls);
           const result = call.name === 'exec' && typeof call.arguments.code === 'string'
-            ? await runtime.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1, maxTurns), signal)
+            ? await runtime.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1, maxTurns,
+              activity && callId ? { reporter: activity.reporter, parentId: callId } : undefined), signal)
             : { text: 'Expected exec with a string code parameter.', isError: true };
           conversation.messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name,
             content: [{ type: 'text', text: result.text }], isError: result.isError, timestamp: Date.now() });
         }
       }
       throw new Error('Child RLM exceeded ' + maxTurns + ' model turns.');
-    } finally { runtime.dispose(); }
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) terminal = 'aborted';
+      throw error;
+    } finally {
+      runtime?.dispose();
+      if (callId) activity?.reporter.terminal(callId, terminal);
+    }
   };
 }
 
