@@ -47,7 +47,13 @@ Child calls use the requested model tier and configured credentials, falling bac
 Return your final answer normally, grounded in inspected data. Workspaces are ephemeral and reset on session changes, reload, timeout, or cancellation.`;
 
 export type Complete = (context: Context, signal: AbortSignal, tier: ModelTier) => Promise<AssistantMessage>;
-export function createQuery(cwd: string, complete: Complete, budget = { remaining: readLimits().maxCalls }, depth = 0): Query {
+export function createQuery(
+  cwd: string,
+  complete: Complete,
+  budget = { remaining: readLimits().maxCalls },
+  depth = 0,
+  maxTurns = readLimits().maxTurns,
+): Query {
   return async (prompt, context, signal, options = {}) => {
     const tier: ModelTier = options.model ?? 'routine';
     signal.throwIfAborted();
@@ -61,7 +67,7 @@ export function createQuery(cwd: string, complete: Complete, budget = { remainin
       tools: [{ name: 'exec', description: 'Execute JavaScript in your persistent workspace.', parameters }],
     };
     try {
-      for (let turn = 0; turn < 8; turn++) {
+      for (let turn = 0; turn < maxTurns; turn++) {
         signal.throwIfAborted();
         const response = await completeWithDeadline(complete, conversation, signal, tier);
         if (response.stopReason === 'error' || response.stopReason === 'aborted') {
@@ -72,13 +78,13 @@ export function createQuery(cwd: string, complete: Complete, budget = { remainin
         if (!calls.length) return response.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
         for (const call of calls) {
           const result = call.name === 'exec' && typeof call.arguments.code === 'string'
-            ? await runtime.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1), signal)
+            ? await runtime.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1, maxTurns), signal)
             : { text: 'Expected exec with a string code parameter.', isError: true };
           conversation.messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name,
             content: [{ type: 'text', text: result.text }], isError: result.isError, timestamp: Date.now() });
         }
       }
-      throw new Error('Child RLM exceeded 8 model turns.');
+      throw new Error('Child RLM exceeded ' + maxTurns + ' model turns.');
     } finally { runtime.dispose(); }
   };
 }
