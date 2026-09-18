@@ -38,3 +38,35 @@ test('pi loader registers tools and commands; loaded extension executes and rese
     for (const handler of extension.handlers.get('session_shutdown')!) await handler({ type: 'session_shutdown' }, ctx);
   }
 });
+
+test('exec result middleware preserves final activity for success and failure, then clears it', async () => {
+  const loaded = await loadExtensions([process.cwd() + '/index.ts'], process.cwd());
+  const extension = loaded.extensions[0]!;
+  const tool = extension.tools.get('exec')!.definition;
+  const handler = extension.handlers.get('tool_result')![0]!;
+  const ctx = { cwd: process.cwd() } as ExtensionContext;
+  const event = (id: string, content: any[], isError: boolean, details?: unknown) =>
+    ({ type: 'tool_result' as const, toolCallId: id, toolName: 'exec', input: {}, content, details, isError });
+  try {
+    const success = await tool.execute('ok', { code: 'print(42)' }, undefined, undefined, ctx);
+    const mergedSuccess = await handler(event('ok', success.content, false, { existing: true }), ctx);
+    expect(mergedSuccess).toMatchObject({ content: success.content, isError: false, details: { existing: true, activity: { totals: { calls: 0 } } } });
+    expect(await handler(event('ok', success.content, false), ctx)).toBeUndefined();
+
+    let failure: unknown;
+    try {
+      await tool.execute('bad', { code: 'throw new Error("private failure")' }, undefined, undefined, ctx);
+    } catch (error) { failure = error; }
+    expect(String(failure)).toContain('private failure');
+    const publicContent = [{ type: 'text' as const, text: 'public failure' }];
+    const mergedFailure = await handler(event('bad', publicContent, true), ctx);
+    expect(mergedFailure).toMatchObject({ content: publicContent, isError: true, details: { activity: { totals: { calls: 0 } } } });
+    expect(JSON.stringify(mergedFailure)).not.toContain('private failure');
+
+    await tool.execute('pending', { code: 'print(1)' }, undefined, undefined, ctx);
+    for (const reset of extension.handlers.get('session_tree')!) await reset({ type: 'session_tree' }, ctx);
+    expect(await handler(event('pending', [], false), ctx)).toBeUndefined();
+  } finally {
+    for (const shutdown of extension.handlers.get('session_shutdown')!) await shutdown({ type: 'session_shutdown' }, ctx);
+  }
+});
