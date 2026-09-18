@@ -70,8 +70,8 @@ test('updates are immediate, coalesced, finally flushed, and never late', async 
 test('collapsed rendering is bounded and expanded rendering is hierarchical', () => {
   const { value } = setup(); const root = value.start({ depth: 1, tier: 'smart' }); const child = value.start({ parentId: root, depth: 2, tier: 'routine' }); value.terminal(child, 'succeeded');
   for (let i = 0; i < 5; i++) { const id = value.start({ depth: 1, tier: 'routine' }); value.terminal(id, 'failed'); }
-  const collapsed = formatActivity(value.snapshot(), false); expect(collapsed.trim()).not.toBe(''); expect(collapsed.split('\n').length).toBeLessThanOrEqual(6);
-  const expanded = formatActivity(value.snapshot(), true); expect(expanded).toContain('call 1 [smart]'); expect(expanded).toContain('  - call 2 [routine]');
+  const collapsed = formatActivity(value.snapshot(), false); expect(collapsed.trim()).not.toBe(''); expect(collapsed.split('\n').length).toBeLessThanOrEqual(9); expect(collapsed).toContain('├─ ● #1 smart'); expect(collapsed).toContain('│  └─ ✓ #2 routine');
+  const expanded = formatActivity(value.snapshot(), true); expect(expanded).toContain('├─ ● #1 smart'); expect(expanded).toContain('│  └─ ✓ #2 routine');
 });
 
 test('retained labels stay stable, report omissions, and identify orphaned descendants', () => {
@@ -84,8 +84,8 @@ test('retained labels stay stable, report omissions, and identify orphaned desce
   expect(snapshot.calls).toHaveLength(1);
   expect(snapshot.calls[0]).toMatchObject({ sequence: 2, parentSequence: 1 });
   const rendered = formatActivity(snapshot, true);
-  expect(rendered).toContain('1 earlier call omitted');
-  expect(rendered).toContain('call 2 (parent call 1 omitted)');
+  expect(rendered).toContain('1 earlier omitted');
+  expect(rendered).toContain('#2 routine'); expect(rendered).toContain('parent #1 omitted');
   value.start({ depth: 1, tier: 'routine' });
-  expect(formatActivity(value.snapshot(), true)).toContain('call 3 [routine]');
+  expect(formatActivity(value.snapshot(), true)).toContain('#3 routine');
 });

@@ -1,33 +1,63 @@
 import type { ActivityCall, ActivitySnapshot } from './activity.ts';
-function callLine(call: ActivityCall, indent = '', note = ''): string {
-  const state = call.status === 'active' ? call.phase : call.status;
-  const duration = call.durationMs === undefined ? '' : ' ' + call.durationMs + 'ms';
-  return indent + 'call ' + call.sequence + note + ' [' + call.tier + '] ' + state + ' turn ' + call.turn + ' tools ' + call.toolCallCount + duration;
+
+function statusIcon(call: ActivityCall): string {
+  if (call.status === 'active') return '●';
+  if (call.status === 'succeeded') return '✓';
+  if (call.status === 'failed') return '✗';
+  return '■';
 }
-/** Plain, bounded text consumed by Pi's wrapping Text component. */
-export function formatActivity(activity: ActivitySnapshot, expanded: boolean): string {
-  const t = activity.totals;
-  const omitted = Math.max(0, t.calls - activity.calls.length);
-  const summary = 'RLM: ' + t.active + ' active, ' + t.succeeded + ' succeeded, ' + t.failed + ' failed, ' + t.aborted + ' aborted; ' + t.modelTurns + ' turns, ' + t.toolCalls + ' tools'
-    + (omitted ? '; ' + omitted + ' earlier call' + (omitted === 1 ? '' : 's') + ' omitted' : '');
-  const ordered = [...activity.calls].sort((a, b) => a.sequence - b.sequence);
-  if (!expanded) {
-    const recent = [...ordered].sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active') || b.updatedAt - a.updatedAt).slice(0, 5);
-    return [summary, ...recent.map(call => callLine(call))].join(String.fromCharCode(10));
-  }
+function duration(ms?: number): string {
+  if (ms === undefined) return '';
+  return ms < 1000 ? ' · ' + ms + 'ms' : ' · ' + (ms / 1000).toFixed(1) + 's';
+}
+function callText(call: ActivityCall, orphan: boolean): string {
+  const state = call.status === 'active'
+    ? call.phase + ' ' + call.turn
+    : call.status + ' · ' + call.turn + ' turn' + (call.turn === 1 ? '' : 's');
+  const execs = call.toolCallCount ? ' · ' + call.toolCallCount + ' exec' + (call.toolCallCount === 1 ? '' : 's') : '';
+  const parent = orphan ? ' · parent #' + (call.parentSequence ?? '?') + ' omitted' : '';
+  return statusIcon(call) + ' #' + call.sequence + ' ' + call.tier + ' · ' + state + execs + duration(call.durationMs) + parent;
+}
+
+interface TreeRow { call: ActivityCall; text: string }
+function treeRows(calls: ActivityCall[]): TreeRow[] {
+  const ordered = [...calls].sort((a, b) => a.sequence - b.sequence);
   const retained = new Set(ordered.map(call => call.id));
   const children = new Map<string | undefined, ActivityCall[]>();
   for (const call of ordered) {
     const key = call.parentId !== undefined && retained.has(call.parentId) ? call.parentId : undefined;
-    const list = children.get(key) ?? []; list.push(call); children.set(key, list);
+    const list = children.get(key) ?? [];
+    list.push(call);
+    children.set(key, list);
   }
-  const rows: string[] = [];
-  const visit = (call: ActivityCall, level: number) => {
+  const rows: TreeRow[] = [];
+  const visit = (call: ActivityCall, prefix: string, last: boolean) => {
     const orphan = call.parentId !== undefined && !retained.has(call.parentId);
-    const note = orphan ? ' (parent call ' + (call.parentSequence ?? '?') + ' omitted)' : '';
-    rows.push(callLine(call, '  '.repeat(Math.min(level, 20)) + (level ? '- ' : ''), note));
-    for (const child of children.get(call.id) ?? []) visit(child, level + 1);
+    rows.push({ call, text: prefix + (last ? '└─ ' : '├─ ') + callText(call, orphan) });
+    const descendants = children.get(call.id) ?? [];
+    const childPrefix = prefix + (last ? '   ' : '│  ');
+    descendants.forEach((child, index) => visit(child, childPrefix, index === descendants.length - 1));
   };
-  for (const root of children.get(undefined) ?? []) visit(root, 0);
-  return [summary, ...rows].join(String.fromCharCode(10));
+  const roots = children.get(undefined) ?? [];
+  roots.forEach((root, index) => visit(root, '', index === roots.length - 1));
+  return rows;
+}
+
+/** A compact tree for the collapsed tool row and the complete retained tree when expanded. */
+export function formatActivity(activity: ActivitySnapshot, expanded: boolean): string {
+  const t = activity.totals;
+  const terminal = t.succeeded + t.failed + t.aborted;
+  let summary = 'RLM  ' + (t.active ? '● ' + t.active + ' active' : '✓ ' + terminal + ' finished')
+    + ' · ' + t.modelTurns + ' turns · ' + t.toolCalls + ' execs';
+  if (t.failed) summary += ' · ' + t.failed + ' failed';
+  if (t.aborted) summary += ' · ' + t.aborted + ' aborted';
+  const retainedOmitted = Math.max(0, t.calls - activity.calls.length);
+  if (retainedOmitted) summary += ' · ' + retainedOmitted + ' earlier omitted';
+
+  const rows = treeRows(activity.calls);
+  const visible = expanded ? rows : rows.slice(0, 8);
+  const hidden = rows.length - visible.length;
+  const output = [summary, ...visible.map(row => row.text)];
+  if (hidden) output.push('└─ … ' + hidden + ' more call' + (hidden === 1 ? '' : 's') + ' (Ctrl+O to expand)');
+  return output.join(String.fromCharCode(10));
 }
