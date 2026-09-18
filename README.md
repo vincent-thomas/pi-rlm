@@ -15,6 +15,8 @@ With pi already installed, run `pi -e ./index.ts`, or install this directory wit
 
 The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use pi's selected model, provider configuration, and authentication.
 
+For ordinary coding requests, the injected execution policy tells the top-level model to inspect, implement, and verify the fix without asking permission for routine repository edits or checks. It still requires explicit authorization for unrequested destructive or external effects, including deployments and pushes; a plain fix request does not create a commit or push.
+
 Tool calls display only the JavaScript source. Expand the tool view with **Ctrl+O** to see the result, including any execution error.
 
 ## Load context

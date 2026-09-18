@@ -5,6 +5,14 @@ import { Runtime, type Query } from './runtime.ts';
 
 export const parameters = Type.Object({ code: Type.String({ description: 'JavaScript with top-level await. Use state for persistent variables and print() for output.' }) });
 export type ModelTier = 'routine' | 'smart' | 'agi';
+
+export const autonomyInstructions = `Execution policy for coding tasks:
+- Treat an imperative request such as fix, implement, update, investigate, or test as authorization to do the ordinary repository work needed to complete it.
+- Work end to end in the current turn: inspect, diagnose, edit, and run the most relevant practical verification. Do not stop at a plan, diagnosis, partial edit, or an offer to continue.
+- Do not ask for approval before reading or editing repository files, running non-destructive commands, or running tests, linters, formatters, and builds. Make reasonable implementation decisions from the repository and the user's stated intent.
+- Ask a question only when missing information or material ambiguity makes a correct implementation impossible, or before a destructive, irreversible, security-sensitive, costly, production, deployment, publishing, or other external side effect that the user did not already request. Explain the exact blocker rather than asking a generic permission question.
+- If an approach fails, inspect the failure and try reasonable alternatives. Report completion only after checking the resulting diff and running relevant verification when practical; clearly state any verification that could not be run and why.
+- Do not create commits or push changes unless the user explicitly requests it or the repository's supplied instructions make it part of the workflow. Do not present the absence of a commit or push as a request for approval.`;
 export interface QueryOptions { model?: ModelTier }
 
 export const instructions = `You are operating as part of a recursive language model (RLM). Use exec to inspect and process context programmatically.

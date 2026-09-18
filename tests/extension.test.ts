@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { instructions } from '../src/rlm.ts';
+import { autonomyInstructions, instructions } from '../src/rlm.ts';
 import { loadExtensions } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
 
 test('pi loader registers tools and commands; loaded extension executes and resets', async () => {
@@ -19,6 +19,8 @@ test('pi loader registers tools and commands; loaded extension executes and rese
       }
       expect(prompt.systemPrompt).toContain('BASE');
       expect(prompt.systemPrompt).toContain('Delegate bounded work only when it materially helps');
+      expect(prompt.systemPrompt).toContain(autonomyInstructions);
+      expect(prompt.systemPrompt).toContain('Do not stop at a plan, diagnosis, partial edit, or an offer to continue');
       expect(prompt.systemPrompt).toContain(instructions);
       expect(prompt.systemPrompt).toContain('start_long_horizon');
     }
