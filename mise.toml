@@ -6,3 +6,6 @@ auto = true
 
 [tasks.start]
 run = "bun --bun node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js -ne -e ./index.ts"
+
+[tasks.test]
+run = "bun run check"
