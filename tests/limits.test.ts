@@ -6,7 +6,7 @@ import { readLimits } from '../src/limits.ts';
 import { Runtime } from '../src/runtime.ts';
 import { createQuery } from '../src/rlm.ts';
 
-const names = ['PI_RLM_EXEC_TIMEOUT_MS', 'PI_RLM_REQUEST_TIMEOUT_MS', 'PI_RLM_MAX_CALLS'];
+const names = ['PI_RLM_EXEC_TIMEOUT_MS', 'PI_RLM_REQUEST_TIMEOUT_MS', 'PI_RLM_MAX_CALLS', 'PI_RLM_MAX_TURNS'];
 const original = Object.fromEntries(names.map(name => [name, process.env[name]]));
 const runtimes: Runtime[] = [];
 afterEach(async () => {
@@ -28,11 +28,12 @@ const answer = (): AssistantMessage => ({ role: 'assistant', content: [{ type: '
 
 test('limits have workflow defaults and explicit opt-out', () => {
   for (const name of names) delete process.env[name];
-  expect(readLimits()).toEqual({ execTimeoutMs: 1800000, requestTimeoutMs: 300000, maxCalls: 1000 });
+  expect(readLimits()).toEqual({ execTimeoutMs: 1800000, requestTimeoutMs: 300000, maxCalls: 1000, maxTurns: 64 });
   process.env.PI_RLM_EXEC_TIMEOUT_MS = '0';
   process.env.PI_RLM_REQUEST_TIMEOUT_MS = '0';
   process.env.PI_RLM_MAX_CALLS = '2500';
-  expect(readLimits()).toEqual({ execTimeoutMs: 0, requestTimeoutMs: 0, maxCalls: 2500 });
+  process.env.PI_RLM_MAX_TURNS = '128';
+  expect(readLimits()).toEqual({ execTimeoutMs: 0, requestTimeoutMs: 0, maxCalls: 2500, maxTurns: 128 });
 });
 
 test('invalid limits fail explicitly rather than overflowing timers', () => {
@@ -44,6 +45,22 @@ test('invalid limits fail explicitly rather than overflowing timers', () => {
   delete process.env.PI_RLM_EXEC_TIMEOUT_MS;
   process.env.PI_RLM_MAX_CALLS = '0';
   expect(() => readLimits()).toThrow('PI_RLM_MAX_CALLS');
+  delete process.env.PI_RLM_MAX_CALLS;
+  for (const value of ['0', '1001']) {
+    process.env.PI_RLM_MAX_TURNS = value;
+    expect(() => readLimits()).toThrow('PI_RLM_MAX_TURNS');
+  }
+});
+
+test('configured child turn limit is enforced', async () => {
+  process.env.PI_RLM_MAX_TURNS = '2';
+  let calls = 0;
+  const query = createQuery(process.cwd(), async () => {
+    calls++;
+    return { ...answer(), content: [{ type: 'toolCall', id: String(calls), name: 'exec', arguments: { code: 'print(1)' } }], stopReason: 'toolUse' };
+  });
+  await expect(query('task', '', new AbortController().signal)).rejects.toThrow('exceeded 2 model turns');
+  expect(calls).toBe(2);
 });
 
 test('disabled workflow deadline still permits cancellation', async () => {

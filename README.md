@@ -104,7 +104,7 @@ Logs remain available after resets and child completion, until explicitly delete
 ## Limits and lifecycle
 
 - Two child levels; by default, 1,000 child calls shared across all descendants of each root `exec` (`PI_RLM_MAX_CALLS`).
-- Eight model turns per child; at most 4096 output tokens per model response.
+- By default, 64 model turns per child (`PI_RLM_MAX_TURNS`); at most 4096 output tokens per model response.
 - Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
 - `/rlm-reset` clears the workspace. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
@@ -119,8 +119,9 @@ Bash runs with your user's permissions; the worker is **not a security sandbox**
 | `PI_RLM_EXEC_TIMEOUT_MS` | `1800000` (30 min) | Whole-cell deadline, including all child work; `0` disables |
 | `PI_RLM_REQUEST_TIMEOUT_MS` | `300000` (5 min) | Timeout for each child model response; `0` disables |
 | `PI_RLM_MAX_CALLS` | `1000` | Positive child-call budget shared across descendants per root cell |
+| `PI_RLM_MAX_TURNS` | `64` | Model-turn limit per child (1–1000) |
 
-Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-child turn/output limits remain unchanged.
+Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-response output limits are fixed; the per-child turn limit is configurable from 1 to 1000.
 
 ### Recovering completed results
 

@@ -116,7 +116,7 @@ test('children recursively invoke children with a shared call budget', async () 
 test('depth and model turn limits fail explicitly', async () => {
   const complete = async () => response([{ type: 'toolCall', id: '1', name: 'exec', arguments: { code: 'print(1)' } }]);
   await expect(createQuery(process.cwd(), complete, { remaining: 1 }, 2)('', '', new AbortController().signal)).rejects.toThrow('depth limit');
-  await expect(createQuery(process.cwd(), complete)('', '', new AbortController().signal)).rejects.toThrow('8 model turns');
+  await expect(createQuery(process.cwd(), complete, { remaining: 1 }, 0, 3)('', '', new AbortController().signal)).rejects.toThrow('3 model turns');
 });
 
 test('routing guidance preserves top-tier attention through delegation', () => {
