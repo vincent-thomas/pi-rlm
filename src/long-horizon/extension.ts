@@ -24,7 +24,7 @@ async function capture(command: string, args: string[], cwd: string): Promise<st
 }
 
 export const longHorizonInstructions = 
-  'When the user gives an explicit measurable optimization target that may require repeated attempts (for example, improve a benchmark by 10%), start the autonomous long-horizon supervisor with start_long_horizon instead of asking the user to manage iterations. Choose the existing canonical verifier, protect benchmark/correctness files, and use a finite deadline. Do not use it for ordinary tasks or from a prompt identifying the agent as an autonomous iteration worker.';
+  'When the user gives an explicit measurable optimization target that may require repeated attempts (for example, improve a benchmark by 10%), delegate discovery of the existing canonical verifier and protected benchmark/correctness paths, then start the autonomous long-horizon supervisor with start_long_horizon instead of asking the user to manage iterations. Use compact worker recommendations to choose a finite deadline. Do not inspect those repository artifacts directly, use this tool for ordinary tasks, or invoke it from a prompt identifying the agent as an autonomous iteration worker.';
 
 export function registerLongHorizon(pi: ExtensionAPI) {
   let poller: ReturnType<typeof setInterval> | undefined;
@@ -47,7 +47,7 @@ export function registerLongHorizon(pi: ExtensionAPI) {
         }
         const marker = join(dir, 'notification-sent');
         try { await readFile(marker); continue; } catch {}
-        pi.sendUserMessage('Autonomous benchmark job ' + name + ' finished with ' + message + ' Review ' + join(dir, 'state.json') + ' and branch ' + metadata.branch + ', then report the verified result to the user.');
+        pi.sendUserMessage('Autonomous benchmark job ' + name + ' finished with ' + message + ' Delegate inspection of ' + join(dir, 'state.json') + ' and branch ' + metadata.branch + ', plus independent review and deterministic verification; then report only a compact verified result to the user.');
         await writeFile(marker, new Date().toISOString() + '\n', { mode: 0o600 });
       } catch { /* A partially created or unrelated job is not ready. */ }
     }

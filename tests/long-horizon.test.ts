@@ -3,10 +3,22 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { runBenchmarkJob } from '../src/long-horizon/supervisor.ts';
+import { promptFor, runBenchmarkJob } from '../src/long-horizon/supervisor.ts';
+import { longHorizonInstructions } from '../src/long-horizon/extension.ts';
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+
+
+test('long-horizon top-level prompts retain scarce-model delegation', () => {
+  expect(longHorizonInstructions).toContain('delegate discovery of the existing canonical verifier');
+  expect(longHorizonInstructions).toContain('Do not inspect those repository artifacts directly');
+  const prompt = promptFor({ objective: 'Improve', baselineScore: 1, bestScore: 1, targetScore: 2 } as any, 1);
+  expect(prompt).toContain('Orchestrate one bounded improvement attempt');
+  expect(prompt).toContain('Delegate all repository inspection, implementation, debugging, testing, and ordinary verification');
+  expect(prompt).toContain('independent delegated review of substantive changes');
+  expect(prompt).toContain('Keep raw files, diffs, logs, and child reports out of top-level context');
+});
 
 async function command(cwd: string, executable: string, args: string[]) {
   await new Promise<void>((resolve, reject) => {
