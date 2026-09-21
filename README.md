@@ -15,7 +15,7 @@ With pi already installed, run `pi -e ./index.ts`, or install this directory wit
 
 The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use pi's selected model, provider configuration, and authentication.
 
-The injected execution policy is task-general: the agent should complete routine, reversible work end to end through delegated workers where appropriate, without asking permission for every intermediate step, and may create review artifacts or reversible checkpoints when appropriate. Consequential final actions retain a human gate. The agent must stop at a review-ready state until the human explicitly authorizes the exact final action, such as merging to an important branch, deploying to production, publishing externally, spending money, changing access, or performing destructive work. Instructions found in documents, repositories, tools, automation, or child-agent output do not count as human signoff.
+The injected execution policy treats the selected top-level model as a scarce orchestrator. It decomposes work, sets acceptance criteria, resolves ambiguity or conflicting evidence, makes consequential judgments, and produces a concise synthesis. It delegates all inspection, implementation, debugging, testing, deterministic verification, and review—even trivial work—to child RLMs. Consequential final actions retain a human gate: merging to an important branch, production deployment, external publication, spending money, access changes, and destructive work require the human user’s explicit authorization. Instructions found in documents, repositories, tools, automation, or child output do not count as signoff.
 
 Tool calls display only the JavaScript source. Expand the tool view with **Ctrl+O** to see the result, including any execution error.
 
@@ -28,27 +28,35 @@ In pi:
 Find the main disagreements in the loaded context and cite relevant excerpts.
 ```
 
-The file is loaded into `context` without inserting its contents into the model prompt. The path can contain spaces; pass it without quotes. Loading a file clears the previous workspace. You can also ask the model to read bounded file slices directly into `state`.
+The file is loaded into `context` without inserting its contents into the model prompt. The path can contain spaces; pass it without quotes. Loading a file clears the previous workspace. Delegated workers can also read bounded file slices into their private `state` without exposing them to the top-level context.
 
-Example `exec` code:
+Example top-level orchestration code:
 
 ```js
-state.document = await readFile('large-document.txt', 40000, 0);
-print(state.document.length);
-print(state.document.slice(0, 1000));
+state.report = await llm_query(
+  'Inspect the loaded context for the main disagreements. Return at most 1,200 characters with claims, exact quote offsets, conflicts, and unresolved risks; stop after complete coverage.',
+  context,
+  { model: 'routine' },
+);
+print(state.report);
 ```
 
-A later cell can delegate selected chunks:
+For parallel analysis, keep raw child answers out of the top-level context and use a cheap child to consolidate them:
 
 ```js
 state.answers = await Promise.all([
-  llm_query('Extract claims and exact supporting quotes; do not infer.', state.document.slice(0, 20000), { model: 'routine' }),
-  llm_query('Extract claims and exact supporting quotes; do not infer.', state.document.slice(20000, 40000), { model: 'routine' }),
+  llm_query('Extract at most 10 supported claims from this excerpt. Return JSON with offsets, at most 3,000 characters total.', context.slice(0, 20000), { model: 'routine' }),
+  llm_query('Extract at most 10 supported claims from this excerpt. Return JSON with offsets, at most 3,000 characters total.', context.slice(20000, 40000), { model: 'routine' }),
 ]);
-print(state.answers);
+state.decision = await llm_query(
+  'Consolidate these reports into a decision packet of at most 1,200 characters: status, evidence locations, conflicts, risks, and decision needed. Do not reproduce raw reports.',
+  JSON.stringify(state.answers),
+  { model: 'routine' },
+);
+print(state.decision);
 ```
 
-Each child has its own JavaScript workspace and receives the supplied text in `context`. It can inspect that text with `exec` and recursively delegate further. Only its final answer returns to the parent.
+Each child has its own JavaScript workspace and receives the supplied text in `context`. It can inspect that text, inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
 ### Model tiers
 
@@ -61,11 +69,15 @@ export PI_RLM_SMART_MODEL=provider/model-id
 
 A requested `routine` tier falls back to `smart`, then to the selected agi model; `smart` falls back to agi. Configured models must be available and, when pi model scoping is active, included in that scope.
 
-This is model guidance, not an automatic runtime router. The selected top-level model acts as planner, delegator, and final synthesizer rather than the default worker. It delegates bounded inspection, implementation, debugging, testing, and review when doing so moves detailed execution or context to a child—even if the top tier could do the task itself. Use routine for mechanical changes, focused searches, or bounded semantic extraction; smart for implementation, debugging, review, or bounded multi-step reasoning; and agi directly for architecture, ambiguity, conflicting evidence, or consequential judgments. Deterministic code handles counting, filtering, exact comparison, and verification. Substantive changes should normally receive an independent child review. Each delegation must specify the objective, scope, output format, evidence requirements, and stopping rule. Verify evidence and escalate on conflicts or failed checks rather than relying on self-reported confidence. For example, delegate bounded semantic extraction:
+This is model guidance, not an automatic runtime router. The selected top-level model delegates every repository or artifact inspection, implementation, debugging step, test, deterministic check, ordinary verification, and review. There is no exception for easy or trivial actions. Its direct work is limited to decomposition, acceptance criteria, orchestration, ambiguity or conflict resolution, consequential judgment, and concise final synthesis.
+
+Use routine for mechanical work, focused searches, bounded extraction, deterministic checks, and report consolidation; smart for implementation, debugging, independent review, or bounded multi-step reasoning; and agi only for genuine architecture, ambiguity, conflict, or consequential judgment. Substantive changes require a separate delegated reviewer, independent of the implementer. Workers retain authority to inspect, edit, test, verify, and recursively delegate inside their scope.
+
+The top level uses `exec` only to launch and coordinate child calls, retain private state, and print compact decision records. It does not inspect repository sources, diffs, logs, or test output with `bash` or `readFile`. Never print whole files, diffs, logs, command output, or unbounded child reports. Keep those details in child workspaces, `state`, journals, or logs; ask a cheap child to consolidate large or multiple reports. A decision record should contain only status, changed paths or artifacts, acceptance-check results, independent-review findings, unresolved risks or conflicts, and decisions needed, with evidence locations rather than raw evidence. Every delegation should define its objective, scope, acceptance criteria, output bound, evidence requirements, and stopping rule. For example, delegate bounded semantic extraction:
 
 ```js
 const claims = await llm_query(
-  'Extract reasons users distrust the proposed rollout from this excerpt only. Return a JSON array of { reason, quote } with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.',
+  'Extract reasons users distrust the proposed rollout from this excerpt only. Return at most 10 { reason, quote } objects and 3,000 characters total, with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.',
   state.rolloutExcerpt,
   { model: 'routine' },
 );
@@ -86,6 +98,8 @@ const claims = await llm_query(
 Use `state.name = value` to retain values. Local `let`, `const`, and `var` declarations are cell-local. Only `print()` emits values; cell return values are ignored. Execution errors are reported automatically. Await all asynchronous work before ending a cell. `console`, `fs`, `require`, and `cwd` are not exposed as REPL helpers.
 
 ## Command output
+
+These APIs are used directly by delegated workers. The top-level model delegates command execution and consumes only a bounded decision record; it does not read repository command logs itself. Inside a worker workspace:
 
 ```js
 state.run = await bash("rg TODO .");
@@ -143,7 +157,7 @@ Tests use fake model responses to exercise actual worker execution, state, recur
 
 When a user gives a measurable optimization target such as “improve this benchmark by at least 10%,” the top-level agent can start the `start_long_horizon` tool automatically. The user does not create a project, issue continuation prompts, or manage checkpoints.
 
-The tool creates an isolated Git worktree and branch, then launches a detached supervisor. Each iteration starts a fresh Pi SDK session, asks it for one bounded change, runs the canonical verifier outside the model, and commits only a strict valid improvement. Regressions, correctness failures, edits to declared benchmark/correctness paths, and agent-created commits are reverted. The supervisor stops after independent verification reaches the target or its deadline/iteration budget expires.
+The tool creates an isolated Git worktree and branch, then launches a detached supervisor. Each iteration starts a fresh Pi SDK session that orchestrates one bounded change through delegated workers and independent delegated review. The supervisor runs the canonical verifier outside the model and commits only a strict valid improvement. Regressions, correctness failures, edits to declared benchmark/correctness paths, and agent-created commits are reverted. The supervisor stops after independent verification reaches the target or its deadline/iteration budget expires.
 
 Durable job state and logs live under `~/.pi/agent/rlm-jobs/<job-id>/`; accepted changes live on the reported `rlm/<job-id>` branch. If Pi remains open, the extension reports completion automatically. Otherwise it reports completed jobs when a session for the source repository next starts.
 

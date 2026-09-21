@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
+import { readFileSync } from 'node:fs';
 import { Runtime } from '../src/runtime.ts';
-import { childInstructions, createQuery, instructions, orchestrationInstructions } from '../src/rlm.ts';
+import { autonomyInstructions, childInstructions, createQuery, instructions, orchestrationInstructions } from '../src/rlm.ts';
 
 const runtimes: Runtime[] = [];
 function runtime(context = '') {
@@ -119,15 +120,61 @@ test('depth and model turn limits fail explicitly', async () => {
   await expect(createQuery(process.cwd(), complete, { remaining: 1 }, 0, 3)('', '', new AbortController().signal)).rejects.toThrow('3 model turns');
 });
 
-test('routing guidance preserves top-tier attention through delegation', () => {
-  expect(orchestrationInstructions).toContain('not as the default worker');
-  expect(orchestrationInstructions).toContain('minimizing top-level context is a benefit in itself');
-  expect(orchestrationInstructions).toContain('mechanical changes');
-  expect(orchestrationInstructions).toContain('worker followed by an independent reviewer');
-  expect(orchestrationInstructions).toContain('Do not equate a task being easy');
-  expect(orchestrationInstructions).toContain('evidence requirements, and stopping rule');
-  expect(orchestrationInstructions).toContain('Check returned evidence against sources');
-  expect(childInstructions).toContain('Use deterministic JavaScript or shell commands');
-  expect(childInstructions).toContain('Own and complete the assigned scope');
-  expect(childInstructions).toContain('do not re-delegate merely because the work is semantic');
+test('top-level policy enforces scarce-model delegation and context firewall', () => {
+  expect(orchestrationInstructions).toContain('never the execution or inspection worker');
+  expect(orchestrationInstructions).toContain('even when the action is trivial, quick, or easy');
+  expect(orchestrationInstructions).toContain('Delegation overhead is not an exception');
+  expect(orchestrationInstructions).toContain('must not use bash or readFile to inspect sources');
+  expect(orchestrationInstructions).toContain('Never print whole files, diffs, logs, command output, or unbounded child answers');
+  expect(orchestrationInstructions).toContain('delegate their consolidation to a cheap child');
+  expect(orchestrationInstructions).toContain('A decision packet must be concise');
+  expect(orchestrationInstructions).toContain('requires an independent delegated review by a child other than the implementer');
+  expect(orchestrationInstructions).toContain('All deterministic checks must also be delegated');
+  expect(orchestrationInstructions).toContain('it does not reopen sources to verify them directly');
+
+  // Reject the former loopholes rather than merely adding stronger prose nearby.
+  expect(orchestrationInstructions).not.toContain('Work directly only');
+  expect(orchestrationInstructions).not.toContain('truly trivial action');
+  expect(orchestrationInstructions).not.toContain('Check returned evidence against sources');
+  expect(orchestrationInstructions).not.toContain('prefer a worker');
+  expect(autonomyInstructions).toContain('through delegation, acceptance decisions, and concise synthesis');
+  expect(autonomyInstructions).toContain('compact delegated evidence');
+  expect(autonomyInstructions).not.toContain('This includes inspecting inputs');
+  expect(autonomyInstructions).not.toContain('inspect, diagnose, act, and verify');
+});
+
+test('top-level policy rejects semantic variants of direct-work loopholes', () => {
+  const forbidden = [
+    /top[- ]level[\s\S]{0,120}(?:may|can|should)[\s\S]{0,80}(?:directly|itself|locally)[\s\S]{0,100}(?:inspect|implement|edit|debug|test|verif|review|check)/i,
+    /(?:trivial|easy|quick|small)[\s\S]{0,100}(?:without delegat|do(?:ing)? it (?:directly|locally)|direct action)/i,
+    /delegation overhead[\s\S]{0,80}(?:greater|exceed|too (?:high|large)|avoid|skip)/i,
+    /top[- ]level[\s\S]{0,100}(?:check|verify)[\s\S]{0,60}(?:source|diff|log|test output)/i,
+  ];
+  for (const loophole of forbidden) expect(orchestrationInstructions).not.toMatch(loophole);
+  expect(autonomyInstructions).not.toMatch(/authorization to (?:perform|do)[\s\S]{0,180}(?:inspect|implement|edit|debug|test|verify)/i);
+
+  const normalized = orchestrationInstructions.toLowerCase();
+  for (const work of ['inspection', 'implementation', 'debugging', 'test run', 'verification', 'deterministic check', 'review']) {
+    expect(normalized).toContain(work);
+  }
+  expect(normalized).toMatch(/delegate every[\s\S]*even when[\s\S]*(?:trivial|easy)/);
+});
+test('worker policy preserves implementation and recursive autonomy without leaking details', () => {
+  expect(childInstructions).toContain('inspect all needed repository files and artifacts');
+  expect(childInstructions).toContain('edit and implement, debug, run tests and deterministic checks');
+  expect(childInstructions).toContain('Recursively delegate separable work when useful');
+  expect(childInstructions).toContain('Descendants receive the same worker authority');
+  expect(childInstructions).toContain('never an unrequested data dump');
+  expect(childInstructions).not.toContain('not the top-level model');
+});
+
+test('shipped delegation examples specify measurable output bounds', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  const prompts = [instructions, readme].flatMap(text =>
+    [...text.matchAll(/llm_query\(\s*(['"`])([\s\S]*?)\1\s*,/g)].map(match => match[2]!),
+  );
+  expect(prompts.length).toBeGreaterThanOrEqual(5);
+  for (const prompt of prompts) {
+    expect(prompt).toMatch(/(?:at most|maximum|no more than|<=)\s*(?:\d|one|two|three|four|five|six|seven|eight|nine|ten)/i);
+  }
 });

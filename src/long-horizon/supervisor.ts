@@ -43,14 +43,15 @@ async function restore(workspace: string, commit: string) {
   await git(workspace, ['clean', '-fd']);
 }
 
-function promptFor(state: BenchmarkJobState, iteration: number): string {
+export function promptFor(state: BenchmarkJobState, iteration: number): string {
   return [
     'You are invocation ' + iteration + ' of an autonomous benchmark-improvement job.',
     'Objective: ' + state.objective,
     'Baseline score: ' + state.baselineScore,
     'Current best score: ' + state.bestScore,
     'Target score: ' + state.targetScore,
-    'Make one bounded improvement attempt in the current workspace.',
+    'Orchestrate one bounded improvement attempt in the current workspace. Delegate all repository inspection, implementation, debugging, testing, and ordinary verification, including trivial steps.',
+    'Require an independent delegated review of substantive changes. Keep raw files, diffs, logs, and child reports out of top-level context; use compact decision packets.',
     'Preserve correctness. Do not modify the benchmark, commit changes, or ask the user for input.',
     'Exit after making the attempt; the supervisor will verify and either accept or revert it.',
   ].join('\n');
