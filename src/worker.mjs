@@ -15,11 +15,26 @@ function print(...args) {
   if (output.length + text.length > limit) truncated = true;
   output += text.slice(0, Math.max(0, limit - output.length));
 }
+function locallyRejected(error) {
+  const result = Promise.reject(error);
+  // Match request(): ignored API promises must not become unhandled rejections.
+  result.catch(() => {});
+  return result;
+}
 function request(type, args) {
   const id = ++nextId;
-  const result = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  let rejectRequest;
+  const result = new Promise((resolve, reject) => {
+    rejectRequest = reject;
+    pending.set(id, { resolve, reject });
+  });
   result.catch(() => {});
-  parentPort.postMessage({ type, id, ...args });
+  try {
+    parentPort.postMessage({ type, id, ...args });
+  } catch (error) {
+    pending.delete(id);
+    rejectRequest(error);
+  }
   return result;
 }
 const sandbox = createContext({
@@ -41,19 +56,45 @@ const sandbox = createContext({
     } finally { activeReads--; }
   },
   bash: command => request('bash', { command }),
+  scratchpad: Object.freeze({
+    read: (offset = 0, len = 16000) => request('scratchpadRead', { offset, len }),
+    edit: (oldText, newText) => {
+      if (typeof oldText !== 'string' || typeof newText !== 'string') {
+        return locallyRejected(new Error('scratchpad.edit(oldText, newText) requires string arguments.'));
+      }
+      if (oldText.length === 0) {
+        return locallyRejected(new Error('scratchpad.edit(oldText, newText): oldText must be a nonempty string.'));
+      }
+      if (Buffer.byteLength(oldText, 'utf8') > 65536 || Buffer.byteLength(newText, 'utf8') > 65536) {
+        return locallyRejected(new Error('scratchpad.edit failed: oldText and newText must each be at most 65536 UTF-8 bytes for transfer.'));
+      }
+      return request('scratchpadEdit', { oldText, newText });
+    },
+  }),
   llm_query: (prompt, context = '', options = {}) => {
     if (typeof prompt !== 'string' || typeof context !== 'string') {
-      return Promise.reject(new Error('llm_query(prompt, context, options) requires prompt and context strings'));
+      return locallyRejected(new Error('llm_query(prompt, context, options) requires prompt and context strings'));
     }
     if (options === null || typeof options !== 'object' || Array.isArray(options) ||
         (options.model !== undefined && !['routine', 'smart', 'agi'].includes(options.model))) {
-      return Promise.reject(new Error("llm_query options.model must be 'routine', 'smart', or 'agi'"));
+      return locallyRejected(new Error("llm_query options must be an object and options.model must be 'routine', 'smart', or 'agi'"));
     }
-    return request('query', { prompt, context, options: { model: options.model ?? 'routine' } });
+    const verification = options.verification;
+    if (verification !== undefined && (verification === null || typeof verification !== 'object' || Array.isArray(verification) ||
+        !Array.isArray(verification.checks) || verification.checks.length < 1 || verification.checks.length > 16 ||
+        verification.checks.some(check => typeof check !== 'string' || !check.trim() || check.length > 2048) ||
+        !Number.isFinite(verification.maxAttempts) || !Number.isInteger(verification.maxAttempts) || verification.maxAttempts < 1 || verification.maxAttempts > 10 ||
+        !Number.isFinite(verification.timeoutMs) || !Number.isInteger(verification.timeoutMs) || verification.timeoutMs < 1 || verification.timeoutMs > 3600000)) {
+      return locallyRejected(new Error('llm_query options.verification requires checks (1..16 nonblank strings, at most 2048 characters each), maxAttempts (integer 1..10), and timeoutMs (integer 1..3600000).'));
+    }
+    return request('query', { prompt, context, options: {
+      model: options.model ?? 'routine',
+      ...(verification === undefined ? {} : { verification: { checks: [...verification.checks], maxAttempts: verification.maxAttempts, timeoutMs: verification.timeoutMs } }),
+    } });
   },
 });
 parentPort.on('message', async message => {
-  if (message.type === 'queryResult' || message.type === 'bashResult') {
+  if (message.type === 'queryResult' || message.type === 'bashResult' || message.type === 'scratchpadResult') {
     if (message.resultsPath) sandbox.resultsPath = message.resultsPath;
     const waiter = pending.get(message.id);
     pending.delete(message.id);
@@ -66,7 +107,7 @@ parentPort.on('message', async message => {
   output = ''; truncated = false;
   try {
     await new Script(`(async () => {\n${message.code}\n})()`, { filename: 'rlm-exec.js' }).runInContext(sandbox);
-    if (pending.size || activeReads) throw new Error('Await every bash, readFile, and llm_query call before ending the cell.');
+    if (pending.size || activeReads) throw new Error('Await every bash, readFile, scratchpad operation, and llm_query call before ending the cell.');
     parentPort.postMessage({ type: 'result', text: output + (truncated ? '\n[Output truncated; print smaller slices.]' : ''), isError: false });
   } catch (error) {
     parentPort.postMessage({ type: 'result', text: output + '\n' + String(error), isError: true, reset: pending.size > 0 || activeReads > 0 });

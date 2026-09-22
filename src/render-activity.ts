@@ -12,7 +12,7 @@ function duration(ms?: number): string {
 }
 function callText(call: ActivityCall, orphan: boolean): string {
   const state = call.status === 'active'
-    ? call.phase + ' ' + call.turn
+    ? (call.phase === 'verification' ? 'verification ' + call.verificationRound : call.phase + ' ' + call.turn)
     : call.status + ' · ' + call.turn + ' turn' + (call.turn === 1 ? '' : 's');
   const execs = call.toolCallCount ? ' · ' + call.toolCallCount + ' exec' + (call.toolCallCount === 1 ? '' : 's') : '';
   const parent = orphan ? ' · parent #' + (call.parentSequence ?? '?') + ' omitted' : '';

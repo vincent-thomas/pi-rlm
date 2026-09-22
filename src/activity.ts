@@ -1,19 +1,21 @@
 import type { ModelTier } from './rlm.ts';
-export type ActivityPhase = 'model' | 'exec';
+export type ActivityPhase = 'model' | 'exec' | 'verification';
 export type ActivityStatus = 'active' | 'succeeded' | 'failed' | 'aborted';
 export type TerminalActivityStatus = Exclude<ActivityStatus, 'active'>;
-export interface ActivityCall { id: string; sequence: number; parentId?: string; parentSequence?: number; depth: number; tier: ModelTier; turn: number; phase: ActivityPhase; toolCallCount: number; status: ActivityStatus; startedAt: number; updatedAt: number; endedAt?: number; durationMs?: number; }
+export interface ActivityCall { id: string; sequence: number; parentId?: string; parentSequence?: number; depth: number; tier: ModelTier; turn: number; phase: ActivityPhase; toolCallCount: number; verificationRound: number; status: ActivityStatus; startedAt: number; updatedAt: number; endedAt?: number; durationMs?: number; }
 export interface ActivityTotals { calls: number; active: number; succeeded: number; failed: number; aborted: number; modelTurns: number; toolCalls: number; durationMs: number; }
 export interface ActivitySnapshot { calls: ActivityCall[]; totals: ActivityTotals; updatedAt: number; }
 export type ActivityEvent =
   | { type: 'started'; id: string; parentId?: string; depth: number; tier: ModelTier; at: number }
   | { type: 'model'; id: string; turn: number; at: number }
   | { type: 'exec'; id: string; toolCalls: number; at: number }
+  | { type: 'verification'; id: string; round: number; at: number }
   | { type: 'terminal'; id: string; status: TerminalActivityStatus; at: number };
 export interface ActivityReporter {
   start(input: { parentId?: string; depth: number; tier: ModelTier }): string;
   model(id: string, turn: number): void;
   exec(id: string, toolCalls: number): void;
+  verification(id: string, round: number): void;
   terminal(id: string, status: TerminalActivityStatus): void;
 }
 export interface ActivityContext { reporter: ActivityReporter; parentId?: string; }
@@ -26,11 +28,12 @@ export function reduceActivity(previous: ActivitySnapshot, event: ActivityEvent,
   if (event.type === 'started') {
     if (index >= 0) return previous;
     const parentSequence = event.parentId === undefined ? undefined : calls.find(call => call.id === event.parentId)?.sequence;
-    calls.push({ id: event.id, sequence: totals.calls + 1, parentId: event.parentId, parentSequence, depth: event.depth, tier: event.tier, turn: 0, phase: 'model', toolCallCount: 0, status: 'active', startedAt: event.at, updatedAt: event.at }); totals.calls++; totals.active++;
+    calls.push({ id: event.id, sequence: totals.calls + 1, parentId: event.parentId, parentSequence, depth: event.depth, tier: event.tier, turn: 0, phase: 'model', toolCallCount: 0, verificationRound: 0, status: 'active', startedAt: event.at, updatedAt: event.at }); totals.calls++; totals.active++;
   } else {
     if (index < 0 || calls[index]!.status !== 'active') return previous;
     const call = calls[index]!; call.updatedAt = event.at;
     if (event.type === 'model') { if (event.turn > call.turn) totals.modelTurns += event.turn - call.turn; call.turn = Math.max(call.turn, event.turn); call.phase = 'model'; }
+    else if (event.type === 'verification') { call.verificationRound = Math.max(call.verificationRound, event.round); call.phase = 'verification'; }
     else if (event.type === 'exec') { const count = Math.max(call.toolCallCount, event.toolCalls); totals.toolCalls += count - call.toolCallCount; call.toolCallCount = count; call.phase = 'exec'; }
     else { call.status = event.status; call.endedAt = event.at; call.durationMs = Math.max(0, event.at - call.startedAt); totals.active--; totals[event.status]++; totals.durationMs += call.durationMs; }
   }
@@ -47,6 +50,7 @@ export class ActivityPublisher implements ActivityReporter {
   start(input: { parentId?: string; depth: number; tier: ModelTier }): string { const id = this.makeId(); this.apply({ type: 'started', id, ...input, at: this.now() }); return id; }
   model(id: string, turn: number): void { this.apply({ type: 'model', id, turn, at: this.now() }); }
   exec(id: string, toolCalls: number): void { this.apply({ type: 'exec', id, toolCalls, at: this.now() }); }
+  verification(id: string, round: number): void { this.apply({ type: 'verification', id, round, at: this.now() }); }
   terminal(id: string, status: TerminalActivityStatus): void { this.apply({ type: 'terminal', id, status, at: this.now() }); }
   private apply(event: ActivityEvent): void { this.state = reduceActivity(this.state, event, this.retention); this.safePublish(); }
   private safePublish(): void { try { this.publish(this.snapshot()); } catch { /* Observers cannot affect execution. */ } }

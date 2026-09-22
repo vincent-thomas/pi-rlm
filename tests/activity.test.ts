@@ -19,6 +19,14 @@ test('lifecycle counts turns and tools and publishes one sanitized terminal snap
   expect(JSON.stringify(history)).not.toMatch(/SENTINEL/);
 });
 
+test('verification is represented as live activity', async () => {
+  const { value, history } = setup();
+  const query = createQuery(process.cwd(), async () => response([{ type: 'text', text: 'done' }]), { remaining: 1 }, 0, 2, { reporter: value });
+  expect(await query('work', '', new AbortController().signal, { verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 } })).toBe('done');
+  expect(history.flatMap(snapshot => snapshot.calls).some(call => call.phase === 'verification' && call.verificationRound === 1)).toBe(true);
+  expect(value.snapshot().calls[0]).toMatchObject({ status: 'succeeded', verificationRound: 1 });
+});
+
 test('recursion inherits reporter and parent relationship', async () => {
   const { value } = setup();
   const query = createQuery(process.cwd(), async ctx => {
@@ -26,10 +34,10 @@ test('recursion inherits reporter and parent relationship', async () => {
     if (ctx.messages[0]?.content === 'nested') return response([{ type: 'text', text: 'child' }]);
     return response([{ type: 'toolCall', id: 't', name: 'exec', arguments: { code: 'print(await llm_query("nested", context))' } }]);
   }, { remaining: 2 }, 0, 3, { reporter: value });
-  await query('root', 'private', new AbortController().signal);
+  await query('root', 'private', new AbortController().signal, { verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 } });
   const [parent, child] = value.snapshot().calls;
-  expect(parent).toMatchObject({ id: 'id-1', depth: 1, status: 'succeeded' });
-  expect(child).toMatchObject({ parentId: 'id-1', depth: 2, status: 'succeeded' });
+  expect(parent).toMatchObject({ id: 'id-1', depth: 1, status: 'succeeded', verificationRound: 1 });
+  expect(child).toMatchObject({ parentId: 'id-1', depth: 2, status: 'succeeded', verificationRound: 0 });
 });
 
 test('concurrent IDs are unique with out-of-order completion', async () => {

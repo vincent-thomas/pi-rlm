@@ -38,11 +38,11 @@ export async function bash(command: string, cwd: string, signal: AbortSignal): P
         if (signal.aborted) abort();
         child.once('error', error => {
           signal.removeEventListener('abort', abort);
-          reject(error);
+          reject(Object.assign(error, { stdoutPath, stderrPath }));
         });
         child.once('close', (code, terminationSignal) => {
           signal.removeEventListener('abort', abort);
-          if (signal.aborted) reject(new Error('Bash execution aborted.'));
+          if (signal.aborted) reject(Object.assign(new Error('Bash execution aborted.'), { stdoutPath, stderrPath }));
           else resolve({ exitCode: code ?? (terminationSignal === 'SIGKILL' ? 137 : 128), stdoutPath, stderrPath });
         });
       });

@@ -60,14 +60,14 @@ Each child has its own JavaScript workspace and receives the supplied text in `c
 
 ### Model tiers
 
-The model selected in pi is the top-level **agi** tier. Configure optional lower tiers with exact model references:
+The model selected in pi is the top-level **agi** tier. The `routine` tier defaults to `gpt-5.6-luna:low`, and the `smart` tier defaults to `gpt-5.6-sol:medium`; override either with an exact model reference:
 
 ```sh
 export PI_RLM_ROUTINE_MODEL=provider/model-id
 export PI_RLM_SMART_MODEL=provider/model-id
 ```
 
-A requested `routine` tier falls back to `smart`, then to the selected agi model; `smart` falls back to agi. Configured models must be available and, when pi model scoping is active, included in that scope.
+A requested lower tier uses its default when the corresponding environment variable is unset, or its configured reference when that variable is nonblank. An explicitly blank variable skips that tier: `routine` proceeds to `smart`, and `smart` proceeds to the selected agi model (so a `routine` request reaches agi only when both lower-tier variables are blank). A nonblank default or configured reference must be available and, when pi model scoping is active, included in that scope; an unavailable or ambiguous reference is an error and does not fall upward.
 
 This is model guidance, not an automatic runtime router. The selected top-level model delegates every repository or artifact inspection, implementation, debugging step, test, deterministic check, ordinary verification, and review. There is no exception for easy or trivial actions. Its direct work is limited to decomposition, acceptance criteria, orchestration, ambiguity or conflict resolution, consequential judgment, and concise final synthesis.
 
@@ -89,11 +89,43 @@ const claims = await llm_query(
 | --- | --- |
 | `context` | Text loaded with `/rlm-load`, or supplied by the parent |
 | `state` | Persistent object shared between cells in this workspace |
+| `scratchpad` | Shared recursion-tree notes via async `read(offset, len)` and `edit(oldText, newText)` only |
 | `resultsPath` | Completed child-result journal path, initially undefined; survives worker resets |
 | `print(...)` | Explicitly send values to the model |
 | `await bash(command)` | Run Bash; return only `{ exitCode, stdoutPath, stderrPath }` |
 | `await readFile(path, len = 16000, offset = 0)` | Read a bounded UTF-8 slice; length and offset are in bytes |
-| `await llm_query(prompt, contextText, { model })` | Query a child RLM using `routine`, `smart`, or `agi`; defaults to `routine` |
+| `await llm_query(prompt, contextText, { model, verification })` | Query a child RLM using `routine`, `smart`, or `agi`; optionally verify terminal answers with repository checks |
+
+### Shared scratchpad
+
+Every top-level workspace and all child/grandchild workspaces in its recursion tree share one in-memory scratchpad. Parallel siblings share it too. It starts with the unique anchor **# Shared scratchpad** followed by a newline; replace that anchor to add the first notes. Reset, context loading, session changes, branch navigation, reload, and shutdown discard its contents.
+
+`scratchpad.read(offset = 0, len = 16000)` returns a UTF-8-decoded byte slice. Offset and length are byte units, EOF returns an empty string, and split multibyte boundaries can produce a replacement character, consistently with `readFile`. Length may not exceed 65,536 bytes. There is no automatic prompt injection or whole-file accessor.
+
+`scratchpad.edit(oldText, newText)` requires strings and a nonempty `oldText`. It atomically replaces the only occurrence. Missing/stale or duplicate matches, invalid arguments, and results over the hard 65,536 UTF-8-byte limit reject without mutation. A capacity-one FIFO queue serializes each complete read or edit, so concurrent callers observe operations in request order. Always await both methods.
+
+### Verified child responses
+
+llm_query accepts an optional verification policy in addition to model:
+
+    const result = await llm_query(
+      'Implement the scoped change. Return a decision packet of at most 1,200 characters with changed paths, check results, and unresolved risks.',
+      context,
+      {
+        model: 'smart',
+        verification: {
+          checks: ['bun run typecheck', 'bun test'],
+          maxAttempts: 3,
+          timeoutMs: 120000,
+        },
+      },
+    );
+
+When verification is present, all three fields are required. checks must contain 1–16 nonblank command strings (up to 2,048 characters each), maxAttempts is an integer from 1–10, and timeoutMs is an integer from 1–3,600,000. The timeout applies separately to each check. Checks run sequentially from pi's current working directory only after a child emits a terminal response, and the complete list runs on every round. A successful response requires every check to exit zero.
+
+After a failed round, the same child conversation and workspace continue with machine feedback containing only the failed command, its numeric exit status, `timeout`, or `error` status, and stdout/stderr log paths. `error` means the check could not be launched or completed normally; its log paths may be unavailable. Raw command output remains in those logs. Exhausting maxAttempts rejects the call rather than returning the last unverified answer. Parent cancellation and workflow deadlines terminate an active command and suppress retries. Verification settings apply only to that call; nested llm_query calls must request their own verification explicitly.
+
+Verification commands execute arbitrary shell code with the extension process's permissions. Use only trusted commands. Each command can run again after a failed round, so prefer idempotent checks and avoid deployments, destructive operations, external side effects, or commands whose repeated execution is unsafe.
 
 Use `state.name = value` to retain values. Local `let`, `const`, and `var` declarations are cell-local. Only `print()` emits values; cell return values are ignored. Execution errors are reported automatically. Await all asynchronous work before ending a cell. `console`, `fs`, `require`, and `cwd` are not exposed as REPL helpers.
 
@@ -118,10 +150,10 @@ Logs remain available after resets and child completion, until explicitly delete
 ## Limits and lifecycle
 
 - Two child levels; by default, 1,000 child calls shared across all descendants of each root `exec` (`PI_RLM_MAX_CALLS`).
-- By default, 64 model turns per child (`PI_RLM_MAX_TURNS`); at most 4096 output tokens per model response.
+- By default, 64 model turns per attempt to produce a terminal child response (`PI_RLM_MAX_TURNS`); a failed verification round keeps the conversation and workspace but starts a fresh turn allowance. At most 4096 output tokens are allowed per model response.
 - Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
-- `/rlm-reset` clears the workspace. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
+- `/rlm-reset` clears the workspace and shared scratchpad. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
 - Timeouts and cancellation discard workspace state; the original loaded `context` is restored in the replacement worker.
 
 Bash runs with your user's permissions; the worker is **not a security sandbox**. On Unix, cancellation kills the active shell's process group. Processes that deliberately detach may survive, and filesystem or other external effects are not rolled back. Recursive requests incur the selected provider's normal usage and are bounded per `exec`, not per conversation. Child transcripts are not added to pi's main session history.
@@ -133,9 +165,9 @@ Bash runs with your user's permissions; the worker is **not a security sandbox**
 | `PI_RLM_EXEC_TIMEOUT_MS` | `1800000` (30 min) | Whole-cell deadline, including all child work; `0` disables |
 | `PI_RLM_REQUEST_TIMEOUT_MS` | `300000` (5 min) | Timeout for each child model response; `0` disables |
 | `PI_RLM_MAX_CALLS` | `1000` | Positive child-call budget shared across descendants per root cell |
-| `PI_RLM_MAX_TURNS` | `64` | Model-turn limit per child (1–1000) |
+| `PI_RLM_MAX_TURNS` | `64` | Model-turn limit per terminal-response attempt (1–1000) |
 
-Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-response output limits are fixed; the per-child turn limit is configurable from 1 to 1000.
+Settings are read from the process environment. Timeout values are integer milliseconds from 0 to 2147483647. Request timeouts abort the provider signal and return an error to the calling workspace; code may catch it and continue. Disabling deadlines does not disable user cancellation. Recursion depth and per-response output limits are fixed; the per-attempt child turn limit is configurable from 1 to 1000. Verification's `maxAttempts` separately bounds how many terminal responses may be checked.
 
 ### Recovering completed results
 

@@ -1,6 +1,9 @@
 import { afterEach, expect, test } from 'bun:test';
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Runtime } from '../src/runtime.ts';
 import { autonomyInstructions, childInstructions, createQuery, instructions, orchestrationInstructions } from '../src/rlm.ts';
 
@@ -74,6 +77,95 @@ test('child model tiers default to routine and explicit tiers are forwarded', as
   );
   expect(result.text).toBe('routine\nagi\n');
   expect(seen).toEqual(['routine', 'agi']);
+});
+
+
+test('verification retries the same conversation, runs every check sequentially, and returns only a verified answer', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'rlm-verification-'));
+  try {
+    let completions = 0;
+    const query = createQuery(cwd, async ctx => {
+      completions++;
+      if (completions === 2) {
+        const feedback = String(ctx.messages.at(-1)?.content);
+        expect(feedback).toContain('Machine verification round 1/2 failed');
+        expect(feedback).toContain('stdoutPath');
+        expect(feedback).toContain('stderrPath');
+        expect(feedback).not.toContain('ACTUAL');
+        await writeFile(join(cwd, 'repaired'), 'yes');
+      }
+      return response([{ type: 'text', text: completions === 1 ? 'unverified' : 'verified' }]);
+    });
+    const result = await query('work', '', new AbortController().signal, { verification: {
+      checks: ["printf '\\101\\103\\124\\125\\101\\114' >&2; test -f repaired", "printf x >> order"], maxAttempts: 2, timeoutMs: 1000,
+    } });
+    expect(result).toBe('verified');
+    expect(completions).toBe(2);
+    expect(await readFile(join(cwd, 'order'), 'utf8')).toBe('xx');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('verification repair gets a fresh model-turn allowance and full bounded check text', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'rlm-verification-turns-'));
+  const longCheck = 'test -f repaired #' + 'x'.repeat(300);
+  try {
+    let calls = 0;
+    const query = createQuery(cwd, async ctx => {
+      calls++;
+      if (calls < 3) return response([{ type: 'toolCall', id: String(calls), name: 'exec', arguments: { code: 'print(1)' } }]);
+      if (calls === 4) {
+        expect(String(ctx.messages.at(-1)?.content)).toContain(longCheck);
+        await writeFile(join(cwd, 'repaired'), 'yes');
+      }
+      return response([{ type: 'text', text: calls === 3 ? 'first' : 'verified' }]);
+    }, { remaining: 1 }, 0, 3);
+    expect(await query('work', '', new AbortController().signal, { verification: {
+      checks: [longCheck], maxAttempts: 2, timeoutMs: 1000,
+    } })).toBe('verified');
+    expect(calls).toBe(4);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('verification exhaustion rejects with statuses and evidence paths', async () => {
+  const query = createQuery(process.cwd(), async () => response([{ type: 'text', text: 'never return me' }]));
+  const failure = query('work', '', new AbortController().signal, { verification: {
+    checks: ['exit 7'], maxAttempts: 2, timeoutMs: 1000,
+  } });
+  await expect(failure).rejects.toThrow(/verification failed after 2 rounds.*status.*7.*stdoutPath.*stderrPath/);
+});
+
+test('verification timeout and parent cancellation stop checks without retrying', async () => {
+  let timeoutCalls = 0;
+  const timed = createQuery(process.cwd(), async () => { timeoutCalls++; return response([{ type: 'text', text: 'x' }]); });
+  await expect(timed('work', '', new AbortController().signal, { verification: {
+    checks: ['sleep 2'], maxAttempts: 1, timeoutMs: 30,
+  } })).rejects.toThrow(/status.*timeout.*stdoutPath.*stderrPath/);
+  expect(timeoutCalls).toBe(1);
+
+  let cancelCalls = 0;
+  const controller = new AbortController();
+  const cancelled = createQuery(process.cwd(), async () => {
+    cancelCalls++;
+    setTimeout(() => controller.abort(new DOMException('root deadline', 'AbortError')), 30);
+    return response([{ type: 'text', text: 'x' }]);
+  });
+  await expect(cancelled('work', '', controller.signal, { verification: {
+    checks: ['sleep 2'], maxAttempts: 3, timeoutMs: 1000,
+  } })).rejects.toThrow();
+  expect(cancelCalls).toBe(1);
+});
+
+test('verification options are validated and forwarded only when explicitly requested', async () => {
+  const seen: any[] = [];
+  const repl = runtime();
+  const good = await repl.exec('print(await llm_query("x", "", { model: "smart", verification: { checks: ["true"], maxAttempts: 2, timeoutMs: 50 } }))',
+    async (_prompt, _context, _signal, options) => { seen.push(options); return 'ok'; });
+  expect(good.text).toBe('ok\n');
+  expect(seen[0]).toEqual({ model: 'smart', verification: { checks: ['true'], maxAttempts: 2, timeoutMs: 50 } });
+  for (const verification of [null, {}, { checks: [], maxAttempts: 1, timeoutMs: 1 }, { checks: [' '], maxAttempts: 1, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 0, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 1, timeoutMs: 1.5 }]) {
+    const code = 'await llm_query("x", "", { verification: ' + JSON.stringify(verification) + ' })';
+    expect((await repl.exec(code, unused)).isError).toBe(true);
+  }
 });
 
 test('createQuery passes the requested tier to model completion', async () => {

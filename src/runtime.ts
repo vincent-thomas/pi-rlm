@@ -5,6 +5,7 @@ import { readLimits } from './limits.ts';
 import { Worker } from 'node:worker_threads';
 import { bash } from './bash.ts';
 import type { QueryOptions } from './rlm.ts';
+import { Scratchpad } from './scratchpad.ts';
 
 export type Query = (prompt: string, context: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
 export interface ExecResult { text: string; isError: boolean }
@@ -27,7 +28,7 @@ export class Runtime {
   }
   private cancel?: (reason: string) => void;
   private termination: Promise<void> = Promise.resolve();
-  constructor(private cwd: string, private context = '') {}
+  constructor(private cwd: string, private context = '', private scratchpad = new Scratchpad()) {}
 
   private terminate(worker: Worker) {
     if (this.worker === worker) this.worker = undefined;
@@ -82,12 +83,16 @@ export class Runtime {
       const onExit = (code: number) => finish({ text: `Worker exited (${code}); workspace reset.`, isError: true }, true);
       const onMessage = async (message: any) => {
         if (message.type === 'result') finish({ text: message.text || '(no output)', isError: message.isError }, message.reset);
-        if (message.type === 'query' || message.type === 'bash') {
-          const type = message.type === 'bash' ? 'bashResult' : 'queryResult';
+        if (message.type === 'query' || message.type === 'bash' || message.type === 'scratchpadRead' || message.type === 'scratchpadEdit') {
+          const type = message.type === 'bash' ? 'bashResult' : message.type === 'query' ? 'queryResult' : 'scratchpadResult';
           try {
             const result = message.type === 'bash'
               ? await bash(message.command, this.cwd, controller.signal)
-              : await query(message.prompt, message.context, controller.signal, message.options);
+              : message.type === 'query'
+                ? await query(message.prompt, message.context, controller.signal, message.options)
+                : message.type === 'scratchpadRead'
+                  ? await this.scratchpad.read(message.offset, message.len)
+                  : await this.scratchpad.edit(message.oldText, message.newText);
             if (!done && message.type === 'query') await this.saveResult(message.prompt, message.options?.model ?? 'routine', result as string);
             if (!done) worker.postMessage({ type, id: message.id, result, resultsPath: this.resultsPath });
           } catch (error) {

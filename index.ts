@@ -4,23 +4,27 @@ import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
+import { Scratchpad } from './src/scratchpad.ts';
 import { ActivityPublisher, ActivityUpdateSink, type ActivitySnapshot } from './src/activity.ts';
 import { formatActivity } from './src/render-activity.ts';
 import { autonomyInstructions, createQuery, instructions, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
 
 export interface RlmToolDetails { activity?: ActivitySnapshot }
 export { formatActivity };
+export type { QueryOptions, VerificationOptions } from './src/rlm.ts';
 
 export default function rlm(pi: ExtensionAPI) {
   registerLongHorizon(pi);
   let runtime: Runtime | undefined;
+  let scratchpad = new Scratchpad();
   let contextLength = 0;
   const activityByToolCall = new Map<string, ActivitySnapshot>();
-  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; activityByToolCall.clear(); };
+  const reset = () => { runtime?.dispose(); runtime = undefined; scratchpad = new Scratchpad(); contextLength = 0; activityByToolCall.clear(); };
   pi.registerTool({
     name: 'exec', label: 'JavaScript',
-    description: 'Execute JavaScript with persistent state, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context) calls. Use print() to show results.',
+    description: 'Execute JavaScript with persistent state, shared scratchpad, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context, options) calls with optional terminal-response verification. Use print() to show results.',
     parameters,
     renderCall({ code }, _theme, context) {
       if (!context.expanded) {
@@ -46,7 +50,7 @@ export default function rlm(pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
     async execute(toolCallId, { code }, signal, onUpdate, ctx) {
-      runtime ??= new Runtime(ctx.cwd);
+      runtime ??= new Runtime(ctx.cwd, '', scratchpad);
       const updates = new ActivityUpdateSink(snapshot => onUpdate?.({ content: [], details: { activity: snapshot } }));
       const activity = new ActivityPublisher(snapshot => { activityByToolCall.set(toolCallId, snapshot); updates.push(snapshot); });
       activity.initial();
@@ -57,22 +61,51 @@ export default function rlm(pi: ExtensionAPI) {
           ? ctx.scopedModels.map(item => item.model)
           : ctx.modelRegistry.getAvailable();
         const findConfigured = (reference: string) => {
-          const exact = available.filter(candidate =>
-            `${candidate.provider}/${candidate.id}` === reference || candidate.id === reference);
-          if (exact.length !== 1) {
-            const detail = exact.length ? 'is ambiguous' : 'is unavailable';
-            throw new Error(`Configured RLM model ${reference} ${detail}. Use an exact provider/model id and ensure it is in scope.`);
+          const exact = (value: string) => {
+            const trimmed = value.trim();
+            const folded = trimmed.toLowerCase();
+            const canonical = available.filter(candidate =>
+              (candidate.provider + '/' + candidate.id).toLowerCase() === folded);
+            if (canonical.length) return canonical;
+            const slash = trimmed.indexOf('/');
+            if (slash >= 0) {
+              const provider = trimmed.slice(0, slash).trim().toLowerCase();
+              const id = trimmed.slice(slash + 1).trim().toLowerCase();
+              const qualified = provider && id ? available.filter(candidate =>
+                candidate.provider.toLowerCase() === provider && candidate.id.toLowerCase() === id) : [];
+              if (qualified.length) return qualified;
+            }
+            return available.filter(candidate => candidate.id.toLowerCase() === folded);
+          };
+          // Match the whole reference first because catalog IDs may themselves contain colons.
+          let matches = exact(reference);
+          let thinkingLevel: ThinkingLevel | undefined;
+          if (matches.length === 0) {
+            const colon = reference.lastIndexOf(':');
+            const suffix = colon < 0 ? '' : reference.slice(colon + 1).toLocaleLowerCase('en-US');
+            if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(suffix)) {
+              matches = exact(reference.slice(0, colon));
+              if (matches.length === 1) thinkingLevel = suffix as ThinkingLevel;
+            }
           }
-          return exact[0]!;
+          if (matches.length !== 1) {
+            const detail = matches.length ? 'is ambiguous' : 'is unavailable';
+            throw new Error('Configured RLM model ' + reference + ' ' + detail + '. Use an exact provider/model id and ensure it is in scope.');
+          }
+          return { model: matches[0]!, thinkingLevel };
         };
         let childModel = model; // The selected top-level model is always the AGI tier.
         const references = tier === 'routine'
-          ? [process.env.PI_RLM_ROUTINE_MODEL, process.env.PI_RLM_SMART_MODEL]
-          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL] : [];
+          ? [process.env.PI_RLM_ROUTINE_MODEL ?? 'gpt-5.6-luna:low', process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium']
+          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium'] : [];
         const reference = references.find(value => value?.trim())?.trim();
-        if (reference) childModel = findConfigured(reference);
-        return ctx.modelRegistry.complete(childModel, conversation, { signal: childSignal, maxTokens: 4096 });
-      }, undefined, undefined, undefined, { reporter: activity });
+        const configured = reference ? findConfigured(reference) : undefined;
+        if (configured) childModel = configured.model;
+        return ctx.modelRegistry.complete(childModel, conversation, {
+          signal: childSignal, maxTokens: 4096,
+          ...(configured?.thinkingLevel === undefined ? {} : { reasoning: configured.thinkingLevel }),
+        });
+      }, undefined, undefined, undefined, { reporter: activity }, scratchpad);
       try {
         const result = await runtime.exec(code, query, signal);
         if (result.isError) throw new Error(result.text);
@@ -105,7 +138,7 @@ export default function rlm(pi: ExtensionAPI) {
       try {
         const path = resolve(ctx.cwd, args.trim());
         const text = await readFile(path, 'utf8');
-        reset(); runtime = new Runtime(ctx.cwd, text); contextLength = text.length;
+        reset(); runtime = new Runtime(ctx.cwd, text, scratchpad); contextLength = text.length;
         ctx.ui.notify(`Loaded ${text.length} characters into context from ${path}.`, 'info');
       } catch (error) { ctx.ui.notify(String(error), 'error'); }
     },
