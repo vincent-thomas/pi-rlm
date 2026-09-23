@@ -98,7 +98,7 @@ const claims = await llm_query(
 
 ### Shared scratchpad
 
-Every top-level workspace and all child/grandchild workspaces in its recursion tree share one in-memory scratchpad. Parallel siblings share it too. It starts with the unique anchor **# Shared scratchpad** followed by a newline; replace that anchor to add the first notes. Reset, context loading, session changes, branch navigation, reload, and shutdown discard its contents.
+Every top-level workspace and all child/grandchild workspaces in its recursion tree share one scratchpad per Pi session. Parallel siblings share it too. It starts with the unique anchor **# Shared scratchpad** followed by a newline; replace that anchor to add the first notes. Each successful edit saves a versioned snapshot as a Pi custom session entry, outside model context. Resuming or reloading the same session restores its latest snapshot, including notes from other branches in that session. `/rlm-reset`, context loading, branch navigation, compaction, and worker timeouts preserve the scratchpad. New sessions and forks start with a fresh scratchpad; switching back restores the original session’s notes. In-memory Pi sessions retain notes only for that session manager’s lifetime. Snapshots follow Pi’s session persistence lifecycle; normal tool execution has an assistant entry before edits are saved.
 
 `scratchpad.read(offset = 0, len = 16000)` returns a UTF-8-decoded byte slice. Offset and length are byte units, EOF returns an empty string, and split multibyte boundaries can produce a replacement character, consistently with `readFile`. Length may not exceed 65,536 bytes. There is no automatic prompt injection or whole-file accessor.
 
@@ -153,7 +153,7 @@ Logs remain available after resets and child completion, until explicitly delete
 - By default, 64 model turns per attempt to produce a terminal child response (`PI_RLM_MAX_TURNS`); a failed verification round keeps the conversation and workspace but starts a fresh turn allowance. At most 4096 output tokens are allowed per model response.
 - Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
-- `/rlm-reset` clears the workspace and shared scratchpad. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
+- `/rlm-reset` clears the JavaScript workspace and loaded context, preserving the session scratchpad. Session changes, branch navigation, and reload also clear the workspace. JavaScript `state` is kept across ordinary turns and compaction, but is not saved to disk; the scratchpad is restored from Pi session entries.
 - Timeouts and cancellation discard workspace state; the original loaded `context` is restored in the replacement worker.
 
 Bash runs with your user's permissions; the worker is **not a security sandbox**. On Unix, cancellation kills the active shell's process group. Processes that deliberately detach may survive, and filesystem or other external effects are not rolled back. Recursive requests incur the selected provider's normal usage and are bounded per `exec`, not per conversation. Child transcripts are not added to pi's main session history.

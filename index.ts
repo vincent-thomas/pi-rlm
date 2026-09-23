@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Runtime } from './src/runtime.ts';
 import { Scratchpad } from './src/scratchpad.ts';
+import { restoreSessionScratchpad } from './src/session-scratchpad.ts';
 import { ActivityPublisher, ActivityUpdateSink, type ActivitySnapshot } from './src/activity.ts';
 import { formatActivity } from './src/render-activity.ts';
 import { autonomyInstructions, createQuery, instructions, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
@@ -21,7 +22,7 @@ export default function rlm(pi: ExtensionAPI) {
   let scratchpad = new Scratchpad();
   let contextLength = 0;
   const activityByToolCall = new Map<string, ActivitySnapshot>();
-  const reset = () => { runtime?.dispose(); runtime = undefined; scratchpad = new Scratchpad(); contextLength = 0; activityByToolCall.clear(); };
+  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; activityByToolCall.clear(); };
   pi.registerTool({
     name: 'exec', label: 'JavaScript',
     description: 'Execute JavaScript with persistent state, shared scratchpad, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context, options) calls with optional terminal-response verification. Use print() to show results.',
@@ -125,9 +126,15 @@ export default function rlm(pi: ExtensionAPI) {
     const details = event.details && typeof event.details === 'object' ? event.details as Record<string, unknown> : {};
     return { content: event.content, isError: event.isError, details: { ...details, activity } };
   });
-  pi.on('session_start', () => { reset(); pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']); });
+  pi.on('session_start', (_event, ctx) => {
+    reset();
+    scratchpad = new Scratchpad(); // Invalidate callbacks from the previous session, even if restore fails.
+    const restored = restoreSessionScratchpad(pi, ctx.sessionManager, () => scratchpad === restored);
+    scratchpad = restored;
+    pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']);
+  });
   pi.on('session_tree', reset);
-  pi.on('session_shutdown', reset);
+  pi.on('session_shutdown', () => { reset(); scratchpad = new Scratchpad(); });
   pi.on('before_agent_start', event => ({
     systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
   }));
