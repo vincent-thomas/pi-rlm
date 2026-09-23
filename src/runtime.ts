@@ -93,7 +93,7 @@ export class Runtime {
                 : message.type === 'scratchpadRead'
                   ? await this.scratchpad.read(message.offset, message.len)
                   : await this.scratchpad.edit(message.oldText, message.newText);
-            if (!done && message.type === 'query') await this.saveResult(message.prompt, message.options?.model ?? 'routine', result as string);
+            if (!done && message.type === 'query') await this.saveResult(message.prompt, message.options?.model ?? 'smart', result as string);
             if (!done) worker.postMessage({ type, id: message.id, result, resultsPath: this.resultsPath });
           } catch (error) {
             if (!done) worker.postMessage({ type, id: message.id, error: String(error) });

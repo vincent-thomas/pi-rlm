@@ -66,7 +66,7 @@ test('parallel child results are correlated correctly', async () => {
   const result = await runtime().exec('state.answers = await Promise.all([llm_query("a", "one"), llm_query("b", "two")]); print(state.answers.join(","))', async (p, c) => p + c);
   expect(result.text).toBe('aone,btwo\n');
 });
-test('child model tiers default to routine and explicit tiers are forwarded', async () => {
+test('child model tiers default to smart and explicit tiers are forwarded', async () => {
   const seen: string[] = [];
   const result = await runtime().exec(
     `print(await llm_query("localize", "one")); print(await llm_query("synthesize", "two", { model: "agi" }))`,
@@ -75,8 +75,8 @@ test('child model tiers default to routine and explicit tiers are forwarded', as
       return options?.model ?? 'missing';
     },
   );
-  expect(result.text).toBe('routine\nagi\n');
-  expect(seen).toEqual(['routine', 'agi']);
+  expect(result.text).toBe('smart\nagi\n');
+  expect(seen).toEqual(['smart', 'agi']);
 });
 
 

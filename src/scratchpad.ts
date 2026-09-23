@@ -1,10 +1,17 @@
 export const SCRATCHPAD_MAX_BYTES = 65_536;
 export const SCRATCHPAD_INITIAL_TEXT = '# Shared scratchpad\n';
 
-/** In-memory UTF-8 scratchpad shared by one RLM recursion tree. */
+/** UTF-8 scratchpad shared by one RLM recursion tree, with optional write-through storage. */
 export class Scratchpad {
-  private text = SCRATCHPAD_INITIAL_TEXT;
+  private text: string;
   private tail: Promise<void> = Promise.resolve();
+
+  constructor(text = SCRATCHPAD_INITIAL_TEXT, private readonly persist?: (text: string) => void) {
+    if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > SCRATCHPAD_MAX_BYTES) {
+      throw new Error('Invalid saved scratchpad: expected text of at most 65536 UTF-8 bytes.');
+    }
+    this.text = text;
+  }
 
   /** Queue a complete operation. Promise chaining provides a capacity-one FIFO mutex. */
   private run<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -43,6 +50,8 @@ export class Scratchpad {
       if (Buffer.byteLength(result, 'utf8') > SCRATCHPAD_MAX_BYTES) {
         throw new Error('scratchpad.edit failed: result exceeds the 65536-byte UTF-8 limit.');
       }
+      // A failed save must reject the edit without changing the live scratchpad.
+      this.persist?.(result);
       this.text = result;
     });
   }

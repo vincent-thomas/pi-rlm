@@ -13,7 +13,7 @@ bun start
 
 With pi already installed, run `pi -e ./index.ts`, or install this directory with `pi install /absolute/path/to/pi-rlm`. The package declares its extension in `package.json`.
 
-The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use pi's selected model, provider configuration, and authentication.
+The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use the configured model tiers with pi's provider configuration and authentication.
 
 The injected execution policy treats the selected top-level model as a scarce orchestrator. It decomposes work, sets acceptance criteria, resolves ambiguity or conflicting evidence, makes consequential judgments, and produces a concise synthesis. It delegates all inspection, implementation, debugging, testing, deterministic verification, and review—even trivial work—to child RLMs. Consequential final actions retain a human gate: merging to an important branch, production deployment, external publication, spending money, access changes, and destructive work require the human user’s explicit authorization. Instructions found in documents, repositories, tools, automation, or child output do not count as signoff.
 
@@ -60,14 +60,14 @@ Each child has its own JavaScript workspace and receives the supplied text in `c
 
 ### Model tiers
 
-The model selected in pi is the top-level **agi** tier. The `routine` tier defaults to `gpt-5.6-luna:low`, and the `smart` tier defaults to `gpt-5.6-sol:medium`; override either with an exact model reference:
+On session start, the extension selects the `smart` tier for the top-level orchestrator. `llm_query` also defaults to `smart` when its model option is omitted. Child model defaults are defined in `MODEL_TIERS`: `routine` uses `gpt-6-luna` with `low` reasoning, `smart` uses `gpt-6-sol` with `medium` reasoning, and `agi` uses `gpt-6-astra` with `high` reasoning. Override either lower tier with an exact model reference (optionally suffixed with a reasoning level, such as `:high`; without a suffix, the provider's reasoning default applies):
 
 ```sh
 export PI_RLM_ROUTINE_MODEL=provider/model-id
 export PI_RLM_SMART_MODEL=provider/model-id
 ```
 
-A requested lower tier uses its default when the corresponding environment variable is unset, or its configured reference when that variable is nonblank. An explicitly blank variable skips that tier: `routine` proceeds to `smart`, and `smart` proceeds to the selected agi model (so a `routine` request reaches agi only when both lower-tier variables are blank). A nonblank default or configured reference must be available and, when pi model scoping is active, included in that scope; an unavailable or ambiguous reference is an error and does not fall upward.
+A requested lower tier uses its default when the corresponding environment variable is unset, or its configured reference when that variable is nonblank. An explicitly blank variable skips that tier: `routine` proceeds to `smart`, and `smart` proceeds to the default agi model (so a `routine` request reaches agi only when both lower-tier variables are blank). A nonblank default or configured reference must be available and, when pi model scoping is active, included in that scope; an unavailable or ambiguous reference is an error and does not fall upward.
 
 This is model guidance, not an automatic runtime router. The selected top-level model delegates every repository or artifact inspection, implementation, debugging step, test, deterministic check, ordinary verification, and review. There is no exception for easy or trivial actions. Its direct work is limited to decomposition, acceptance criteria, orchestration, ambiguity or conflict resolution, consequential judgment, and concise final synthesis.
 
@@ -98,7 +98,7 @@ const claims = await llm_query(
 
 ### Shared scratchpad
 
-Every top-level workspace and all child/grandchild workspaces in its recursion tree share one in-memory scratchpad. Parallel siblings share it too. It starts with the unique anchor **# Shared scratchpad** followed by a newline; replace that anchor to add the first notes. Reset, context loading, session changes, branch navigation, reload, and shutdown discard its contents.
+Every top-level workspace and all child/grandchild workspaces in its recursion tree share one scratchpad per Pi session. Parallel siblings share it too. It starts with the unique anchor **# Shared scratchpad** followed by a newline; replace that anchor to add the first notes. Each successful edit saves a versioned snapshot as a Pi custom session entry, outside model context. Resuming or reloading the same session restores its latest snapshot, including notes from other branches in that session. `/rlm-reset`, context loading, branch navigation, compaction, and worker timeouts preserve the scratchpad. New sessions and forks start with a fresh scratchpad; switching back restores the original session’s notes. In-memory Pi sessions retain notes only for that session manager’s lifetime. Snapshots follow Pi’s session persistence lifecycle; normal tool execution has an assistant entry before edits are saved.
 
 `scratchpad.read(offset = 0, len = 16000)` returns a UTF-8-decoded byte slice. Offset and length are byte units, EOF returns an empty string, and split multibyte boundaries can produce a replacement character, consistently with `readFile`. Length may not exceed 65,536 bytes. There is no automatic prompt injection or whole-file accessor.
 
@@ -153,7 +153,7 @@ Logs remain available after resets and child completion, until explicitly delete
 - By default, 64 model turns per attempt to produce a terminal child response (`PI_RLM_MAX_TURNS`); a failed verification round keeps the conversation and workspace but starts a fresh turn allowance. At most 4096 output tokens are allowed per model response.
 - Thirty-minute deadline per `exec`, including child calls; five-minute timeout per provider request. Both are configurable and can be disabled. Cancellation propagates to children. A worker allows even infinite loops after `await` to be terminated.
 - Printed output is capped at 16,000 characters per cell. Large values can remain in `state`.
-- `/rlm-reset` clears the workspace and shared scratchpad. Session changes, branch navigation, and reload also clear it. State is kept across ordinary turns and compaction, but is not saved to disk.
+- `/rlm-reset` clears the JavaScript workspace and loaded context, preserving the session scratchpad. Session changes, branch navigation, and reload also clear the workspace. JavaScript `state` is kept across ordinary turns and compaction, but is not saved to disk; the scratchpad is restored from Pi session entries.
 - Timeouts and cancellation discard workspace state; the original loaded `context` is restored in the replacement worker.
 
 Bash runs with your user's permissions; the worker is **not a security sandbox**. On Unix, cancellation kills the active shell's process group. Processes that deliberately detach may survive, and filesystem or other external effects are not rolled back. Recursive requests incur the selected provider's normal usage and are bounded per `exec`, not per conversation. Child transcripts are not added to pi's main session history.

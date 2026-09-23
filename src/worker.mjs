@@ -88,7 +88,7 @@ const sandbox = createContext({
       return locallyRejected(new Error('llm_query options.verification requires checks (1..16 nonblank strings, at most 2048 characters each), maxAttempts (integer 1..10), and timeoutMs (integer 1..3600000).'));
     }
     return request('query', { prompt, context, options: {
-      model: options.model ?? 'routine',
+      model: options.model ?? 'smart',
       ...(verification === undefined ? {} : { verification: { checks: [...verification.checks], maxAttempts: verification.maxAttempts, timeoutMs: verification.timeoutMs } }),
     } });
   },

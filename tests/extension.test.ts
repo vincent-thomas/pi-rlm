@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { SessionManager, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { autonomyInstructions, childInstructions, instructions, orchestrationInstructions } from '../src/rlm.ts';
 import { loadExtensions } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
 
@@ -44,10 +44,55 @@ test('pi loader registers tools and commands; loaded extension executes and rese
     expect(first.content).toEqual([{ type: 'text', text: '42\n' }]);
     for (const handler of extension.handlers.get('session_tree')!) await handler({ type: 'session_tree' }, ctx);
     const second = await tool.execute('2', { code: 'print(typeof state.answer); print(JSON.stringify(await scratchpad.read()))' }, undefined, undefined, ctx);
-    expect(second.content).toEqual([{ type: 'text', text: 'undefined\n"# Shared scratchpad\\n"\n' }]);
+    expect(second.content).toEqual([{ type: 'text', text: 'undefined\n"session note"\n' }]);
   } finally {
     for (const handler of extension.handlers.get('session_shutdown')!) await handler({ type: 'session_shutdown' }, ctx);
   }
+});
+
+test('session lifecycle restores notes while workspace reset and context loading preserve them', async () => {
+  let manager = SessionManager.inMemory(process.cwd());
+  const first = manager;
+  const loaded = await loadExtensions([process.cwd() + '/index.ts'], process.cwd());
+  const extension = loaded.extensions[0]!;
+  loaded.runtime.setActiveTools = () => {};
+  loaded.runtime.appendEntry = (type, data) => { manager.appendCustomEntry(type, data); };
+  loaded.runtime.setModel = async () => true;
+  loaded.runtime.setThinkingLevel = () => {};
+  const ctx = {
+    cwd: process.cwd(), get sessionManager() { return manager; }, ui: { notify: () => {} },
+    scopedModels: [], modelRegistry: { getAvailable: () => [{ provider: 'mock', id: 'gpt-6-sol' }] },
+  } as unknown as ExtensionContext;
+  const start = async (reason: 'startup' | 'reload' | 'new' | 'resume') => {
+    for (const handler of extension.handlers.get('session_start')!) await handler({ type: 'session_start', reason }, ctx);
+  };
+  const shutdown = async () => {
+    for (const handler of extension.handlers.get('session_shutdown')!) await handler({ type: 'session_shutdown' }, ctx);
+  };
+  const tool = extension.tools.get('exec')!.definition;
+  const execute = async (code: string) => (await tool.execute('lifecycle', { code }, undefined, undefined, ctx)).content;
+  const expectNotes = async (text: string) => {
+    expect(await execute('print(await scratchpad.read())')).toEqual([{ type: 'text', text: text + '\n' }]);
+  };
+  try {
+    await start('startup');
+    await execute("state.answer = 42; await scratchpad.edit('# Shared scratchpad\\n', 'session notes')");
+    await extension.commands.get('rlm-reset')!.handler('', ctx as never);
+    expect(await execute('print(typeof state.answer)')).toEqual([{ type: 'text', text: 'undefined\n' }]);
+    await expectNotes('session notes');
+    await extension.commands.get('rlm-load')!.handler('package.json', ctx as never);
+    await expectNotes('session notes');
+    await shutdown();
+    await start('reload');
+    await expectNotes('session notes');
+    manager = SessionManager.inMemory(process.cwd());
+    await start('new');
+    await expectNotes('# Shared scratchpad\n');
+    await execute("await scratchpad.edit('# Shared scratchpad\\n', 'second session')");
+    manager = first;
+    await start('resume');
+    await expectNotes('session notes');
+  } finally { await shutdown(); }
 });
 
 test('exec result middleware preserves final activity for success and failure, then clears it', async () => {
@@ -82,6 +127,42 @@ test('exec result middleware preserves final activity for success and failure, t
   }
 });
 
+test('session start selects the smart top-level model and reasoning', async () => {
+  const previousSmart = process.env.PI_RLM_SMART_MODEL;
+  delete process.env.PI_RLM_SMART_MODEL;
+  const loaded = await loadExtensions([process.cwd() + '/index.ts'], process.cwd());
+  const extension = loaded.extensions[0]!;
+  const models = [
+    { provider: 'mock', id: 'gpt-6-sol', reasoning: true },
+    { provider: 'mock', id: 'gpt-6-astra', reasoning: true },
+    { provider: 'mock', id: 'custom', reasoning: true },
+  ];
+  const selected: string[] = [];
+  const reasoning: string[] = [];
+  loaded.runtime.setActiveTools = () => {};
+  loaded.runtime.setModel = async model => { selected.push(model.id); return true; };
+  loaded.runtime.setThinkingLevel = level => { reasoning.push(level); };
+  const ctx = { sessionManager: SessionManager.inMemory(), scopedModels: [], modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
+  const start = async () => {
+    for (const handler of extension.handlers.get('session_start')!) await handler({ type: 'session_start' }, ctx);
+  };
+  try {
+    await start();
+    process.env.PI_RLM_SMART_MODEL = 'mock/custom:high';
+    await start();
+    process.env.PI_RLM_SMART_MODEL = '';
+    await start();
+    expect(selected).toEqual(['gpt-6-sol', 'custom', 'gpt-6-astra']);
+    expect(reasoning).toEqual(['medium', 'high', 'high']);
+    loaded.runtime.setModel = async () => false;
+    await expect(start()).rejects.toThrow('Unable to select the smart-tier top-level model');
+  } finally {
+    if (previousSmart === undefined) delete process.env.PI_RLM_SMART_MODEL;
+    else process.env.PI_RLM_SMART_MODEL = previousSmart;
+    for (const handler of extension.handlers.get('session_shutdown')!) await handler({ type: 'session_shutdown' }, ctx);
+  }
+});
+
 test('child model routing honors defaults, configured references, explicit blanks, and strict failures', async () => {
   const previousRoutine = process.env.PI_RLM_ROUTINE_MODEL;
   const previousSmart = process.env.PI_RLM_SMART_MODEL;
@@ -92,8 +173,9 @@ test('child model routing honors defaults, configured references, explicit blank
   const seen: Array<{ id: string; reasoning?: string }> = [];
   const models = [
     { provider: 'mock', id: 'agi' },
-    { provider: 'mock', id: 'gpt-5.6-luna', reasoning: true },
-    { provider: 'mock', id: 'gpt-5.6-sol', reasoning: true },
+    { provider: 'mock', id: 'gpt-6-luna', reasoning: true },
+    { provider: 'mock', id: 'gpt-6-sol', reasoning: true },
+    { provider: 'mock', id: 'gpt-6-astra', reasoning: true },
     { provider: 'mock', id: 'routine-custom' },
     { provider: 'mock', id: 'smart-custom' },
     { provider: 'CaseProvider', id: 'MixedModel' },
@@ -119,38 +201,39 @@ test('child model routing honors defaults, configured references, explicit blank
   } as unknown as ExtensionContext;
   try {
     const tool = extension.tools.get('exec')!.definition;
-    await tool.execute('defaults', { code: 'await llm_query("r"); await llm_query("s", "", { model: "smart" })' }, undefined, undefined, ctx);
+    await tool.execute('defaults', { code: 'await llm_query("r", "", { model: "routine" }); await llm_query("s"); await llm_query("a", "", { model: "agi" })' }, undefined, undefined, ctx);
 
     process.env.PI_RLM_ROUTINE_MODEL = 'mock/routine-custom';
     process.env.PI_RLM_SMART_MODEL = 'smart-custom';
-    await tool.execute('configured', { code: 'await llm_query("r"); await llm_query("s", "", { model: "smart" })' }, undefined, undefined, ctx);
+    await tool.execute('configured', { code: 'await llm_query("r", "", { model: "routine" }); await llm_query("s", "", { model: "smart" })' }, undefined, undefined, ctx);
 
     process.env.PI_RLM_ROUTINE_MODEL = '  ';
-    await tool.execute('blank-routine', { code: 'await llm_query("r")' }, undefined, undefined, ctx);
+    await tool.execute('blank-routine', { code: 'await llm_query("r", "", { model: "routine" })' }, undefined, undefined, ctx);
     process.env.PI_RLM_SMART_MODEL = '';
-    await tool.execute('blank-lower-tiers', { code: 'await llm_query("r"); await llm_query("s", "", { model: "smart" })' }, undefined, undefined, ctx);
+    await tool.execute('blank-lower-tiers', { code: 'await llm_query("r", "", { model: "routine" }); await llm_query("s", "", { model: "smart" })' }, undefined, undefined, ctx);
 
     process.env.PI_RLM_ROUTINE_MODEL = 'caseprovider/mixedmodel:HIGH';
-    await tool.execute('case-insensitive', { code: 'await llm_query("r")' }, undefined, undefined, ctx);
+    await tool.execute('case-insensitive', { code: 'await llm_query("r", "", { model: "routine" })' }, undefined, undefined, ctx);
 
     process.env.PI_RLM_ROUTINE_MODEL = 'TWIN';
     let ambiguous: unknown;
-    try { await tool.execute('ambiguous', { code: 'await llm_query("r")' }, undefined, undefined, ctx); }
+    try { await tool.execute('ambiguous', { code: 'await llm_query("r", "", { model: "routine" })' }, undefined, undefined, ctx); }
     catch (error) { ambiguous = error; }
     expect(String(ambiguous)).toContain('Configured RLM model TWIN is ambiguous');
 
     process.env.PI_RLM_ROUTINE_MODEL = 'missing';
     process.env.PI_RLM_SMART_MODEL = 'smart-custom';
     let unavailable: unknown;
-    try { await tool.execute('unavailable', { code: 'await llm_query("r")' }, undefined, undefined, ctx); }
+    try { await tool.execute('unavailable', { code: 'await llm_query("r", "", { model: "routine" })' }, undefined, undefined, ctx); }
     catch (error) { unavailable = error; }
     expect(String(unavailable)).toContain('Configured RLM model missing is unavailable');
 
     expect(seen).toEqual([
-      { id: 'gpt-5.6-luna', reasoning: 'low' }, { id: 'gpt-5.6-sol', reasoning: 'medium' },
+      { id: 'gpt-6-luna', reasoning: 'low' }, { id: 'gpt-6-sol', reasoning: 'medium' },
+      { id: 'gpt-6-astra', reasoning: 'high' },
       { id: 'routine-custom' }, { id: 'smart-custom' },
       { id: 'smart-custom' },
-      { id: 'agi' }, { id: 'agi' },
+      { id: 'gpt-6-astra', reasoning: 'high' }, { id: 'gpt-6-astra', reasoning: 'high' },
       { id: 'MixedModel', reasoning: 'high' },
     ]);
   } finally {
