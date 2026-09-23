@@ -1,4 +1,4 @@
-import { highlightCode, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { highlightCode, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
@@ -8,13 +8,65 @@ import { Scratchpad } from './src/scratchpad.ts';
 import { restoreSessionScratchpad } from './src/session-scratchpad.ts';
 import { ActivityPublisher, ActivityUpdateSink, type ActivitySnapshot } from './src/activity.ts';
 import { formatActivity } from './src/render-activity.ts';
-import { autonomyInstructions, createQuery, instructions, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
+import { autonomyInstructions, createQuery, instructions, MODEL_TIERS, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
 
 export interface RlmToolDetails { activity?: ActivitySnapshot }
 export { formatActivity };
 export type { QueryOptions, VerificationOptions } from './src/rlm.ts';
+
+function resolveModelTier(ctx: ExtensionContext, tier: ModelTier) {
+  const available = ctx.scopedModels.length
+    ? ctx.scopedModels.map(item => item.model)
+    : ctx.modelRegistry.getAvailable();
+  const findConfigured = (reference: string) => {
+    const exact = (value: string) => {
+      const trimmed = value.trim();
+      const folded = trimmed.toLowerCase();
+      const canonical = available.filter(candidate =>
+        (candidate.provider + '/' + candidate.id).toLowerCase() === folded);
+      if (canonical.length) return canonical;
+      const slash = trimmed.indexOf('/');
+      if (slash >= 0) {
+        const provider = trimmed.slice(0, slash).trim().toLowerCase();
+        const id = trimmed.slice(slash + 1).trim().toLowerCase();
+        const qualified = provider && id ? available.filter(candidate =>
+          candidate.provider.toLowerCase() === provider && candidate.id.toLowerCase() === id) : [];
+        if (qualified.length) return qualified;
+      }
+      return available.filter(candidate => candidate.id.toLowerCase() === folded);
+    };
+    // Match the whole reference first because catalog IDs may themselves contain colons.
+    let matches = exact(reference);
+    let thinkingLevel: ThinkingLevel | undefined;
+    if (matches.length === 0) {
+      const colon = reference.lastIndexOf(':');
+      const suffix = colon < 0 ? '' : reference.slice(colon + 1).toLocaleLowerCase('en-US');
+      if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(suffix)) {
+        matches = exact(reference.slice(0, colon));
+        if (matches.length === 1) thinkingLevel = suffix as ThinkingLevel;
+      }
+    }
+    if (matches.length !== 1) {
+      const detail = matches.length ? 'is ambiguous' : 'is unavailable';
+      throw new Error('Configured RLM model ' + reference + ' ' + detail + '. Use an exact provider/model id and ensure it is in scope.');
+    }
+    return { model: matches[0]!, thinkingLevel };
+  };
+  const tiers: ModelTier[] = tier === 'routine' ? ['routine', 'smart', 'agi']
+    : tier === 'smart' ? ['smart', 'agi'] : ['agi'];
+  const candidates = tiers.map(candidate => {
+    const defaults = MODEL_TIERS[candidate];
+    const override = candidate === 'routine' ? process.env.PI_RLM_ROUTINE_MODEL
+      : candidate === 'smart' ? process.env.PI_RLM_SMART_MODEL : undefined;
+    return { reference: (override ?? defaults.model).trim(), reasoning: override === undefined ? defaults.reasoning : undefined };
+  });
+  const selected = candidates.find(candidate => candidate.reference)!;
+  const configured = findConfigured(selected.reference);
+  const reasoning = configured.thinkingLevel ?? selected.reasoning;
+  return { model: configured.model, reasoning };
+}
 
 export default function rlm(pi: ExtensionAPI) {
   registerLongHorizon(pi);
@@ -55,56 +107,11 @@ export default function rlm(pi: ExtensionAPI) {
       const updates = new ActivityUpdateSink(snapshot => onUpdate?.({ content: [], details: { activity: snapshot } }));
       const activity = new ActivityPublisher(snapshot => { activityByToolCall.set(toolCallId, snapshot); updates.push(snapshot); });
       activity.initial();
-      const model = ctx.model;
       const query = createQuery(ctx.cwd, async (conversation, childSignal, tier: ModelTier) => {
-        if (!model) throw new Error('Select an AGI/top-level model before calling llm_query.');
-        const available = ctx.scopedModels.length
-          ? ctx.scopedModels.map(item => item.model)
-          : ctx.modelRegistry.getAvailable();
-        const findConfigured = (reference: string) => {
-          const exact = (value: string) => {
-            const trimmed = value.trim();
-            const folded = trimmed.toLowerCase();
-            const canonical = available.filter(candidate =>
-              (candidate.provider + '/' + candidate.id).toLowerCase() === folded);
-            if (canonical.length) return canonical;
-            const slash = trimmed.indexOf('/');
-            if (slash >= 0) {
-              const provider = trimmed.slice(0, slash).trim().toLowerCase();
-              const id = trimmed.slice(slash + 1).trim().toLowerCase();
-              const qualified = provider && id ? available.filter(candidate =>
-                candidate.provider.toLowerCase() === provider && candidate.id.toLowerCase() === id) : [];
-              if (qualified.length) return qualified;
-            }
-            return available.filter(candidate => candidate.id.toLowerCase() === folded);
-          };
-          // Match the whole reference first because catalog IDs may themselves contain colons.
-          let matches = exact(reference);
-          let thinkingLevel: ThinkingLevel | undefined;
-          if (matches.length === 0) {
-            const colon = reference.lastIndexOf(':');
-            const suffix = colon < 0 ? '' : reference.slice(colon + 1).toLocaleLowerCase('en-US');
-            if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(suffix)) {
-              matches = exact(reference.slice(0, colon));
-              if (matches.length === 1) thinkingLevel = suffix as ThinkingLevel;
-            }
-          }
-          if (matches.length !== 1) {
-            const detail = matches.length ? 'is ambiguous' : 'is unavailable';
-            throw new Error('Configured RLM model ' + reference + ' ' + detail + '. Use an exact provider/model id and ensure it is in scope.');
-          }
-          return { model: matches[0]!, thinkingLevel };
-        };
-        let childModel = model; // The selected top-level model is always the AGI tier.
-        const references = tier === 'routine'
-          ? [process.env.PI_RLM_ROUTINE_MODEL ?? 'gpt-5.6-luna:low', process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium']
-          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium'] : [];
-        const reference = references.find(value => value?.trim())?.trim();
-        const configured = reference ? findConfigured(reference) : undefined;
-        if (configured) childModel = configured.model;
-        return ctx.modelRegistry.complete(childModel, conversation, {
+        const { model, reasoning } = resolveModelTier(ctx, tier);
+        return ctx.modelRegistry.complete(model, conversation, {
           signal: childSignal, maxTokens: 4096,
-          ...(configured?.thinkingLevel === undefined ? {} : { reasoning: configured.thinkingLevel }),
+          ...(reasoning === undefined ? {} : { reasoning }),
         });
       }, undefined, undefined, undefined, { reporter: activity }, scratchpad);
       try {
@@ -126,17 +133,20 @@ export default function rlm(pi: ExtensionAPI) {
     const details = event.details && typeof event.details === 'object' ? event.details as Record<string, unknown> : {};
     return { content: event.content, isError: event.isError, details: { ...details, activity } };
   });
-  pi.on('session_start', (_event, ctx) => {
+  pi.on('session_start', async (_event, ctx) => {
     reset();
     scratchpad = new Scratchpad(); // Invalidate callbacks from the previous session, even if restore fails.
     const restored = restoreSessionScratchpad(pi, ctx.sessionManager, () => scratchpad === restored);
     scratchpad = restored;
     pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']);
+    const { model, reasoning } = resolveModelTier(ctx, 'smart');
+    if (!await pi.setModel(model)) throw new Error('Unable to select the smart-tier top-level model: ' + model.provider + '/' + model.id);
+    if (reasoning !== undefined) pi.setThinkingLevel(reasoning);
   });
   pi.on('session_tree', reset);
   pi.on('session_shutdown', () => { reset(); scratchpad = new Scratchpad(); });
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\nYou are the top-level AGI tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level orchestrator, defaulting to the smart tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',

@@ -13,7 +13,7 @@ bun start
 
 With pi already installed, run `pi -e ./index.ts`, or install this directory with `pi install /absolute/path/to/pi-rlm`. The package declares its extension in `package.json`.
 
-The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use pi's selected model, provider configuration, and authentication.
+The extension activates **only `exec`** when a session starts. It runs JavaScript, including top-level `await`. Child calls use the configured model tiers with pi's provider configuration and authentication.
 
 The injected execution policy treats the selected top-level model as a scarce orchestrator. It decomposes work, sets acceptance criteria, resolves ambiguity or conflicting evidence, makes consequential judgments, and produces a concise synthesis. It delegates all inspection, implementation, debugging, testing, deterministic verification, and review—even trivial work—to child RLMs. Consequential final actions retain a human gate: merging to an important branch, production deployment, external publication, spending money, access changes, and destructive work require the human user’s explicit authorization. Instructions found in documents, repositories, tools, automation, or child output do not count as signoff.
 
@@ -60,14 +60,14 @@ Each child has its own JavaScript workspace and receives the supplied text in `c
 
 ### Model tiers
 
-The model selected in pi is the top-level **agi** tier. The `routine` tier defaults to `gpt-5.6-luna:low`, and the `smart` tier defaults to `gpt-5.6-sol:medium`; override either with an exact model reference:
+On session start, the extension selects the `smart` tier for the top-level orchestrator. `llm_query` also defaults to `smart` when its model option is omitted. Child model defaults are defined in `MODEL_TIERS`: `routine` uses `gpt-6-luna` with `low` reasoning, `smart` uses `gpt-6-sol` with `medium` reasoning, and `agi` uses `gpt-6-astra` with `high` reasoning. Override either lower tier with an exact model reference (optionally suffixed with a reasoning level, such as `:high`; without a suffix, the provider's reasoning default applies):
 
 ```sh
 export PI_RLM_ROUTINE_MODEL=provider/model-id
 export PI_RLM_SMART_MODEL=provider/model-id
 ```
 
-A requested lower tier uses its default when the corresponding environment variable is unset, or its configured reference when that variable is nonblank. An explicitly blank variable skips that tier: `routine` proceeds to `smart`, and `smart` proceeds to the selected agi model (so a `routine` request reaches agi only when both lower-tier variables are blank). A nonblank default or configured reference must be available and, when pi model scoping is active, included in that scope; an unavailable or ambiguous reference is an error and does not fall upward.
+A requested lower tier uses its default when the corresponding environment variable is unset, or its configured reference when that variable is nonblank. An explicitly blank variable skips that tier: `routine` proceeds to `smart`, and `smart` proceeds to the default agi model (so a `routine` request reaches agi only when both lower-tier variables are blank). A nonblank default or configured reference must be available and, when pi model scoping is active, included in that scope; an unavailable or ambiguous reference is an error and does not fall upward.
 
 This is model guidance, not an automatic runtime router. The selected top-level model delegates every repository or artifact inspection, implementation, debugging step, test, deterministic check, ordinary verification, and review. There is no exception for easy or trivial actions. Its direct work is limited to decomposition, acceptance criteria, orchestration, ambiguity or conflict resolution, consequential judgment, and concise final synthesis.
 
