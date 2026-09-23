@@ -97,8 +97,8 @@ export default function rlm(pi: ExtensionAPI) {
         };
         let childModel = model; // The selected top-level model is always the AGI tier.
         const references = tier === 'routine'
-          ? [process.env.PI_RLM_ROUTINE_MODEL ?? 'gpt-5.6-luna', process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol']
-          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol'] : [];
+          ? [process.env.PI_RLM_ROUTINE_MODEL ?? 'gpt-5.6-luna:low', process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium']
+          : tier === 'smart' ? [process.env.PI_RLM_SMART_MODEL ?? 'gpt-5.6-sol:medium'] : [];
         const reference = references.find(value => value?.trim())?.trim();
         const configured = reference ? findConfigured(reference) : undefined;
         if (configured) childModel = configured.model;
