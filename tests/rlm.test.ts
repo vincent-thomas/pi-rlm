@@ -258,6 +258,9 @@ test('top-level policy enforces scarce-model delegation and context firewall', (
   expect(orchestrationInstructions).toContain('it does not reopen sources to verify them directly');
   expect(orchestrationInstructions).toContain("llm_query defaults to inherit: 'full'");
   expect(orchestrationInstructions).toContain("Use inherit: 'none' when genuine independence or isolation matters");
+  expect(orchestrationInstructions).toContain("prefer routine for narrow deterministic checks");
+  expect(orchestrationInstructions).toContain("inherit: 'none' when a self-contained prompt suffices");
+  expect(orchestrationInstructions).toContain("Promise.all");
   expect(orchestrationInstructions).toContain('Do not copy inherited conversation content back into prompts');
   expect(orchestrationInstructions).toContain('An isolated prompt must explicitly contain every requirement and constraint');
 
