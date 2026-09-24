@@ -56,7 +56,6 @@ print(state.decision);
 
 Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
-<<<<<<< HEAD
 ### Opt-in Git preflight and claim consistency
 
 In a delegated worker's `exec` cell, request compact local Git metadata before coordinating work:
@@ -71,14 +70,12 @@ print(check);
 ```
 
 These helpers run in pi's working directory and **do not** stash, reset, create worktrees, push or contact GitHub. Preflight includes tracked/untracked (not ignored) paths and caps displayed dirty paths at 20 and worktrees at 10, returning counts for omitted entries. It may reveal file names and can fail on enormous or unavailable Git repositories. `validateClaims` compares a full commit SHA and branch to local Git and checks a PR number against the number in a canonical GitHub PR URL; it cannot verify the remote PR's identity, state, code quality or test outcomes. A passing schema/consistency check is **not evidence that the claims are true**. For remote PR state, run a separate deterministic `gh pr view` check.
-||||||| 04cc313
-=======
+
 ### Recursive activity timing
 
 The activity snapshots and tool display record metadata-only elapsed milliseconds for each child: modelMs times awaited provider requests (including timeout or cancellation); execMs times JavaScript exec calls; verificationMs times optional verification rounds. Values accumulate per call and across calls, including failed or aborted phases. durationMs remains each call's end-to-end elapsed wall time. Nested child model time can overlap a parent's execMs, and parallel calls overlap each other: never add phase totals to infer task wall-clock time or exclusive CPU time. Rendering rounds to whole milliseconds. No prompts, answers, code, logs, or check output are added to activity.
 
 To benchmark throughput, fix a representative workload and acceptance checks, then compare current routing with explicitly selected routine and inherit: none for independent, self-contained checks and Promise.all for genuinely parallel work. Record externally measured task start-to-finish p50/p95, correctness/review defects, cancellation and timeout rates, call counts, and activity phase totals over repeated runs. Keep the always-delegate policy and default tier unchanged; change routing only if end-to-end time improves without reducing quality. Provider latency varies, and phase totals alone are not a controlled speed benchmark.
->>>>>>> b114bf3
 
 ### Model tiers
 
