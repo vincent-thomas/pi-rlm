@@ -59,7 +59,7 @@ test('configured child turn limit is enforced', async () => {
     calls++;
     return { ...answer(), content: [{ type: 'toolCall', id: String(calls), name: 'exec', arguments: { code: 'print(1)' } }], stopReason: 'toolUse' };
   });
-  await expect(query('task', '', new AbortController().signal)).rejects.toThrow('exceeded 2 model turns');
+  await expect(query('task', new AbortController().signal)).rejects.toThrow('exceeded 2 model turns');
   expect(calls).toBe(2);
 });
 
@@ -85,12 +85,12 @@ test('configured workflow deadline is applied', async () => {
 
 test('completed child results survive worker timeout and can be recovered', async () => {
   const r = runtime();
-  const first = await r.exec('state.answer = await llm_query("task", "private context"); print(resultsPath)', async () => 'valuable answer');
+  const first = await r.exec('state.answer = await llm_query("task: private context"); print(resultsPath)', async () => 'valuable answer');
   expect(first.isError).toBe(false);
   expect(first.text.trim()).toBe(r.resultsPath!);
   const record = JSON.parse((await readFile(r.resultsPath!, 'utf8')).trim());
   expect(record.result).toBe('valuable answer');
-  expect(record.prompt).toBe('task');
+  expect(record.prompt).toBe('task: private context');
   expect(record).not.toHaveProperty('context');
   const stopped = await r.exec('while (true) {}', unused, undefined, 30);
   expect(stopped.text).toContain(r.resultsPath!);
@@ -114,7 +114,7 @@ test('per-request timeout aborts providers even when they ignore the signal', as
     requestSignal = signal;
     return new Promise<AssistantMessage>(() => {});
   });
-  await expect(query('task', '', new AbortController().signal)).rejects.toThrow('request timed out');
+  await expect(query('task', new AbortController().signal)).rejects.toThrow('request timed out');
   expect(requestSignal.aborted).toBe(true);
 });
 
@@ -127,7 +127,7 @@ test('disabled request timeout still propagates parent cancellation', async () =
     controller.abort(new Error('user canceled'));
     return new Promise<AssistantMessage>(() => {});
   });
-  await expect(query('task', '', controller.signal)).rejects.toThrow('user canceled');
+  await expect(query('task', controller.signal)).rejects.toThrow('user canceled');
   expect(requestSignal.aborted).toBe(true);
 });
 
@@ -135,8 +135,8 @@ test('configured child budget is shared across calls', async () => {
   process.env.PI_RLM_MAX_CALLS = '1';
   const query = createQuery(process.cwd(), async () => answer());
   const signal = new AbortController().signal;
-  expect(await query('one', '', signal)).toBe('done');
-  await expect(query('two', '', signal)).rejects.toThrow('budget exhausted');
+  expect(await query('one', signal)).toBe('done');
+  await expect(query('two', signal)).rejects.toThrow('budget exhausted');
 });
 
 test('a workflow can catch a request timeout and continue', async () => {

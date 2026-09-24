@@ -1,4 +1,4 @@
-import { highlightCode, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { buildSessionContext, convertToLlm, highlightCode, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Text } from '@earendil-works/pi-tui';
 import { js as beautify } from 'js-beautify';
 import { readFile } from 'node:fs/promises';
@@ -73,11 +73,12 @@ export default function rlm(pi: ExtensionAPI) {
   let runtime: Runtime | undefined;
   let scratchpad = new Scratchpad();
   let contextLength = 0;
+  let loadedContext = '';
   const activityByToolCall = new Map<string, ActivitySnapshot>();
-  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; activityByToolCall.clear(); };
+  const reset = () => { runtime?.dispose(); runtime = undefined; contextLength = 0; loadedContext = ''; activityByToolCall.clear(); };
   pi.registerTool({
     name: 'exec', label: 'JavaScript',
-    description: 'Execute JavaScript with persistent state, shared scratchpad, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, context, options) calls with optional terminal-response verification. Use print() to show results.',
+    description: 'Execute JavaScript with persistent state, shared scratchpad, bash(command), readFile(path, len, offset), and recursive llm_query(prompt, options) calls with full or isolated context inheritance and optional verification. Use print() to show results.',
     parameters,
     renderCall({ code }, _theme, context) {
       if (!context.expanded) {
@@ -113,7 +114,10 @@ export default function rlm(pi: ExtensionAPI) {
           signal: childSignal, maxTokens: 4096,
           ...(reasoning === undefined ? {} : { reasoning }),
         });
-      }, undefined, undefined, undefined, { reporter: activity }, scratchpad);
+      }, undefined, undefined, undefined, { reporter: activity }, scratchpad,
+      { systemPrompt: '', messages: ctx.sessionManager
+        ? convertToLlm(buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages)
+        : [] }, loadedContext);
       try {
         const result = await runtime.exec(code, query, signal);
         if (result.isError) throw new Error(result.text);
@@ -155,7 +159,7 @@ export default function rlm(pi: ExtensionAPI) {
       try {
         const path = resolve(ctx.cwd, args.trim());
         const text = await readFile(path, 'utf8');
-        reset(); runtime = new Runtime(ctx.cwd, text, scratchpad); contextLength = text.length;
+        reset(); loadedContext = text; runtime = new Runtime(ctx.cwd, text, scratchpad); contextLength = text.length;
         ctx.ui.notify(`Loaded ${text.length} characters into context from ${path}.`, 'info');
       } catch (error) { ctx.ui.notify(String(error), 'error'); }
     },
