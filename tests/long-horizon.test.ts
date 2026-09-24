@@ -134,22 +134,19 @@ test('rejects an unprotected workspace verifier entrypoint', async () => {
   await command(workspace, 'git', ['add', 'verify.sh']);
   await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'verifier']);
   config.verifier.command = './verify.sh';
-  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Workspace verifier input must be a tracked protected path');
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('canonical absolute external executable');
 });
 
-test('rejects tampering with a protected workspace verifier', async () => {
-  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt\necho tampered >> verify.sh');
+test('rejects even protected workspace verifier entrypoints', async () => {
+  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
   const verifier = join(workspace, 'verify.sh');
-  await writeFile(verifier, '#!/bin/sh\nprintf \'{"valid":true,"score":%s}\\n\' "$(cat score.txt)"\n');
+  await writeFile(verifier, '#!/bin/sh\nexit 0\n');
   await chmod(verifier, 0o700);
   await command(workspace, 'git', ['add', 'verify.sh']);
   await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'verifier']);
   config.protectedPaths.push('verify.sh');
-  config.verifier.command = './verify.sh';
-  const state = await runBenchmarkJob(config, jobDir);
-  expect(state.iterations[0]?.outcome).toBe('rejected');
-  expect(state.iterations[0]?.reason).toContain('verify.sh');
-  expect(state.bestScore).toBe(100);
+  config.verifier.command = verifier;
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('outside the editable workspace');
 });
 
 test('CLI persists terminal failure and notifier handles stale running state', async () => {
@@ -173,8 +170,29 @@ test('CLI persists terminal failure and notifier handles stale running state', a
   expect(messages[0]).toContain('status failed');
 });
 
-test('rejects shell inline verifier code that can load unprotected workspace scripts', async () => {
+test.each([
+  ['python module', '/usr/bin/python3', ['-m', 'verifier']],
+  ['node preload', '/usr/bin/node', ['--import=./helper.mjs']],
+  ['inline shell', '/bin/sh', ['-lc', './unprotected.sh']],
+])('rejects unsafe verifier argument forms: %s', async (_label, executable, args) => {
   const { jobDir, config } = await guardrailFixture('echo 120 > score.txt');
-  config.verifier = { command: 'sh', args: ['-lc', './unprotected.sh'] };
-  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Inline verifier code is not allowed');
+  config.verifier = { command: executable, args };
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('canonical absolute external executable with no arguments');
+});
+
+test.each(['dead supervisor', 'expired job'])('notifies once for a %s with stale running state', async scenario => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, 'metadata.json'), JSON.stringify({ sourceWorkspace: workspace, branch: 'test-branch' }));
+  const deadlineAt = new Date(Date.now() + (scenario === 'dead supervisor' ? 300_000 : -120_000)).toISOString();
+  await writeFile(join(jobDir, 'state.json'), JSON.stringify({ status: 'running', deadlineAt, bestScore: 100, targetScore: 110 }));
+  await writeFile(join(jobDir, 'supervisor.json'), JSON.stringify({ pid: scenario === 'dead supervisor' ? 2147483647 : process.pid }));
+  const messages: string[] = [];
+  const pi = { sendUserMessage: (text: string) => { messages.push(text); } } as any;
+  await notifyCompleted(pi, workspace, root);
+  await notifyCompleted(pi, workspace, root);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toContain('status failed');
+  expect(messages[0]).toContain(scenario === 'dead supervisor' ? 'no longer running' : 'expired');
+  expect(JSON.parse(await readFile(join(jobDir, 'failure.json'), 'utf8')).status).toBe('failed');
 });

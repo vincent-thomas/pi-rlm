@@ -11,6 +11,7 @@ import type { BenchmarkJobConfig, BenchmarkJobState } from './types.ts';
 const jobsRoot = join(homedir(), '.pi', 'agent', 'rlm-jobs');
 const cliPath = fileURLToPath(new URL('./cli.ts', import.meta.url));
 const agentPath = fileURLToPath(new URL('./pi-agent.ts', import.meta.url));
+const overdueGraceMs = 60_000;
 
 async function capture(command: string, args: string[], cwd: string): Promise<string> {
   return await new Promise((ok, fail) => {
@@ -44,8 +45,31 @@ export async function notifyCompleted(pi: Pick<ExtensionAPI, 'sendUserMessage'>,
           message = 'status failed. Error: ' + failure.error;
         } else {
           const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as BenchmarkJobState;
-          if (state.status === 'running') continue;
-          message = 'status ' + state.status + '. Best score: ' + state.bestScore + '; target: ' + state.targetScore + '.';
+          if (state.status === 'running') {
+            let pid: number | undefined;
+            try {
+              const supervisor = JSON.parse(await readFile(join(dir, 'supervisor.json'), 'utf8')) as { pid?: number };
+              pid = supervisor.pid;
+            } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            let dead = false;
+            if (Number.isSafeInteger(pid) && pid! > 0) {
+              try { process.kill(pid!, 0); }
+              catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') dead = true; else if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error; }
+            }
+            const expired = Date.now() > Date.parse(state.deadlineAt) + overdueGraceMs;
+            if (!dead && !expired) continue;
+            const reason = dead ? 'Detached supervisor is no longer running.' : 'Job expired without a terminal result.';
+            // Recheck: the detached process may have finished during this poll.
+            const latest = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as BenchmarkJobState;
+            if (latest.status !== 'running') {
+              message = 'status ' + latest.status + '. Best score: ' + latest.bestScore + '; target: ' + latest.targetScore + '.';
+            } else {
+              await writeFile(join(dir, 'failure.json'), JSON.stringify({ status: 'failed', error: reason, failedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
+              message = 'status failed. Error: ' + reason;
+            }
+          } else {
+            message = 'status ' + state.status + '. Best score: ' + state.bestScore + '; target: ' + state.targetScore + '.';
+          }
         }
         const marker = join(dir, 'notification-sent');
         try { await readFile(marker); continue; } catch {}
@@ -70,8 +94,7 @@ export function registerLongHorizon(pi: ExtensionAPI) {
     description: 'Start a durable autonomous optimization job. Use only for an explicit measurable benchmark target; no follow-up input is required.',
     parameters: Type.Object({
       objective: Type.String(),
-      verifierCommand: Type.String({ description: 'Trusted canonical verifier executable. Workspace-local verifier scripts and their dependencies must be tracked protected paths. It must print {valid:boolean,score:number,summary?:string}.' }),
-      verifierArgs: Type.Optional(Type.Array(Type.String())),
+      verifierCommand: Type.String({ description: 'Trusted canonical verifier executable. It must be an absolute path outside the editable workspace, with no arguments; all dependencies must be immutable to the agent. It must print {valid:boolean,score:number,summary?:string}.' }),
       targetImprovement: Type.Optional(Type.Number({ minimum: 0.001, maximum: 10 })),
       deadlineMinutes: Type.Optional(Type.Number({ minimum: 1, maximum: 10080 })),
       protectedPaths: Type.Array(Type.String(), { minItems: 1, description: 'Tracked benchmark and correctness paths the optimizer must not modify.' }),
@@ -94,7 +117,7 @@ export function registerLongHorizon(pi: ExtensionAPI) {
         targetImprovement: params.targetImprovement ?? 0.10,
         protectedPaths: params.protectedPaths,
         agent: { command: 'bun', args: [agentPath], timeoutMs: 30 * 60_000 },
-        verifier: { command: params.verifierCommand, args: params.verifierArgs ?? [], timeoutMs: 30 * 60_000 },
+        verifier: { command: params.verifierCommand, timeoutMs: 30 * 60_000 },
       };
       const configPath = join(dir, 'config.json');
       await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
@@ -104,6 +127,8 @@ export function registerLongHorizon(pi: ExtensionAPI) {
       try {
         const child = spawn('bun', [cliPath, configPath, dir], { cwd: sourceWorkspace, detached: true, stdio: ['ignore', out, err] });
         await new Promise<void>((ok, fail) => { child.once('spawn', ok); child.once('error', fail); });
+        if (!child.pid) throw new Error('Detached supervisor did not provide a PID.');
+        await writeFile(join(dir, 'supervisor.json'), JSON.stringify({ pid: child.pid, startedAt: new Date().toISOString() }) + '\n', { mode: 0o600 });
         child.unref();
       } finally { closeSync(out); closeSync(err); }
       return { content: [{ type: 'text', text: 'Started autonomous job ' + id + '. It will continue without user input. State: ' + join(dir, 'state.json') + '; result branch: ' + branch }], details: { id, dir, branch } };

@@ -26,33 +26,16 @@ function validateConfig(config: BenchmarkJobConfig): void {
   if (!config.protectedPaths.length || config.protectedPaths.some(path => !path || path.startsWith('/') || path.includes('..'))) throw new Error('At least one safe relative protected path is required.');
 }
 
-// Local verifier entrypoints must be protected: otherwise the agent can forge a score.
+// The verifier is trusted code, not an arbitrary command assembled from model input.
+// Generic argument parsing cannot safely classify modules, preloads or interpreters.
 async function validateVerifier(config: BenchmarkJobConfig): Promise<void> {
-  const args = config.verifier.args ?? [];
-  if (args.some(arg => ['-c', '-e', '--eval', '--execute', '--command'].includes(arg)) ||
-      (/^(sh|bash|zsh|dash)$/.test(config.verifier.command.split('/').at(-1) ?? '') &&
-       args.some(arg => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg)))) {
-    throw new Error('Inline verifier code is not allowed; use a protected verifier entrypoint.');
+  if (!isAbsolute(config.verifier.command) || config.verifier.args?.length) {
+    throw new Error('Verifier must be a canonical absolute external executable with no arguments.');
   }
-  for (const input of [config.verifier.command, ...args]) {
-    if (input.startsWith('-')) continue;
-    const path = resolve(config.workspace, input);
-    let canonical: string;
-    try { canonical = await realpath(path); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    const local = relative(config.workspace, canonical);
-    const supplied = relative(config.workspace, path);
-    const within = (name: string) => !name || (!name.startsWith('..') && !isAbsolute(name));
-    if (within(local) || within(supplied)) {
-      const named = within(supplied) ? supplied : local;
-      if (!config.protectedPaths.some(protectedPath => named === protectedPath || named.startsWith(protectedPath + '/')) ||
-          !await git(config.workspace, ['ls-files', '--error-unmatch', '--', named]).then(() => true, () => false)) {
-        throw new Error('Workspace verifier input must be a tracked protected path: ' + input);
-      }
-    }
+  const executable = await realpath(config.verifier.command);
+  const local = relative(config.workspace, executable);
+  if (!local || (!local.startsWith('..') && !isAbsolute(local))) {
+    throw new Error('Verifier executable must be outside the editable workspace.');
   }
 }
 
