@@ -50,6 +50,31 @@ test('claim checks reject mismatched local branch, commit, and PR number versus 
   await expect(validateClaims(cwd, signal, { branch: 'task-branch', status: 'verified' })).rejects.toThrow('validateClaims requires');
 }));
 
+test('claim checks reject adversarial PR URLs rather than trusting ambiguous text', async () => repo(async cwd => {
+  const signal = new AbortController().signal;
+  for (const url of [
+    'https://github.com/a?x/b/pull/15',
+    'https://github.com/a/b/pull/15?other=16',
+    'https://github.com/a/b/pull/15#fragment',
+    'https://alice:secret@github.com/a/b/pull/15',
+    'https://github.com@evil.example/a/b/pull/15',
+    'https://github.com/a//pull/15',
+    'https://github.com/-owner/b/pull/15',
+    'https://github.com/a/b/pull/015',
+    'https://github.com/a/b/pull/15/../16',
+    'https://github.com/a/%62/pull/15',
+    'https://github.com/a/b/pull/15/',
+    'http://github.com/a/b/pull/15',
+  ]) {
+    const result = await validateClaims(cwd, signal, { pr: { number: 15, url } });
+    expect(result.errors).toContain('PR URL must be a canonical GitHub pull-request URL.');
+  }
+  const mismatch = await validateClaims(cwd, signal, {
+    pr: { number: 16, url: 'https://github.com/a/b/pull/15' },
+  });
+  expect(mismatch.errors).toContain('Claimed PR number differs from PR URL.');
+}));
+
 test('exec exposes opt-in helpers and handles invalid claims without resetting workspace', async () => repo(async cwd => {
   const runtime = new Runtime(cwd);
   try {

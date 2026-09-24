@@ -71,9 +71,19 @@ export async function validateClaims(cwd: string, signal: AbortSignal, value: un
   if (claims.pr?.headBranch !== undefined && claims.pr.headBranch !== local.branch) errors.push('Claimed PR head branch differs from local branch.');
   if (claims.pr?.headBranch !== undefined && claims.branch !== undefined && claims.pr.headBranch !== claims.branch) errors.push('Claimed PR head branch differs from claimed branch.');
   if (claims.pr?.url !== undefined) {
-    const match = /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/([1-9]\d*)\/?$/.exec(claims.pr.url);
-    if (!match) errors.push('PR URL must be a canonical GitHub pull-request URL.');
-    else if (claims.pr.number !== undefined && Number(match[1]) !== claims.pr.number) errors.push('Claimed PR number differs from PR URL.');
+    let number: number | undefined;
+    try {
+      const parsed = new URL(claims.pr.url);
+      const match = /^\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)$/.exec(parsed.pathname);
+      if (parsed.protocol === 'https:' && parsed.hostname === 'github.com' && !parsed.port &&
+          !parsed.username && !parsed.password && !parsed.search && !parsed.hash && match &&
+          match[2] !== '.' && match[2] !== '..' && match[2]!.length <= 100 &&
+          claims.pr.url === 'https://github.com/' + match[1] + '/' + match[2] + '/pull/' + match[3]) {
+        number = Number(match[3]);
+      }
+    } catch { /* invalid URL */ }
+    if (!Number.isSafeInteger(number)) errors.push('PR URL must be a canonical GitHub pull-request URL.');
+    else if (claims.pr.number !== undefined && number !== claims.pr.number) errors.push('Claimed PR number differs from PR URL.');
   }
   return { ok: errors.length === 0, errors, local: { root: local.root, branch: local.branch, head: local.head },
     unverified: ['PR existence, remote head, checks, merge status, and claims about code or tests are not verified.'] };
