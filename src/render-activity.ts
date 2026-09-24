@@ -10,13 +10,17 @@ function duration(ms?: number): string {
   if (ms === undefined) return '';
   return ms < 1000 ? ' · ' + ms + 'ms' : ' · ' + (ms / 1000).toFixed(1) + 's';
 }
+function phases(call: Pick<ActivityCall, 'modelMs' | 'execMs' | 'verificationMs'>): string {
+  if (!call.modelMs && !call.execMs && !call.verificationMs) return '';
+  return ' · model ' + Math.round(call.modelMs) + 'ms / exec ' + Math.round(call.execMs) + 'ms / verify ' + Math.round(call.verificationMs) + 'ms';
+}
 function callText(call: ActivityCall, orphan: boolean): string {
   const state = call.status === 'active'
     ? (call.phase === 'verification' ? 'verification ' + call.verificationRound : call.phase + ' ' + call.turn)
     : call.status + ' · ' + call.turn + ' turn' + (call.turn === 1 ? '' : 's');
   const execs = call.toolCallCount ? ' · ' + call.toolCallCount + ' exec' + (call.toolCallCount === 1 ? '' : 's') : '';
   const parent = orphan ? ' · parent #' + (call.parentSequence ?? '?') + ' omitted' : '';
-  return statusIcon(call) + ' #' + call.sequence + ' ' + call.tier + ' · ' + state + execs + duration(call.durationMs) + parent;
+  return statusIcon(call) + ' #' + call.sequence + ' ' + call.tier + ' · ' + state + execs + duration(call.durationMs) + phases(call) + parent;
 }
 
 interface TreeRow { call: ActivityCall; text: string }
@@ -49,6 +53,7 @@ export function formatActivity(activity: ActivitySnapshot, expanded: boolean): s
   const terminal = t.succeeded + t.failed + t.aborted;
   let summary = 'RLM  ' + (t.active ? '● ' + t.active + ' active' : '✓ ' + terminal + ' finished')
     + ' · ' + t.modelTurns + ' turns · ' + t.toolCalls + ' execs';
+  summary += phases(t);
   if (t.failed) summary += ' · ' + t.failed + ' failed';
   if (t.aborted) summary += ' · ' + t.aborted + ' aborted';
   const retainedOmitted = Math.max(0, t.calls - activity.calls.length);

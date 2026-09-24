@@ -97,3 +97,53 @@ test('retained labels stay stable, report omissions, and identify orphaned desce
   value.start({ depth: 1, tier: 'routine' });
   expect(formatActivity(value.snapshot(), true)).toContain('#3 routine');
 });
+
+
+test('phase timings accumulate across success and verification', async () => {
+  const { value } = setup();
+  const times = [0, 11, 11, 29, 29, 37, 37, 54];
+  let n = 0;
+  const query = createQuery(process.cwd(), async () => ++n === 1
+    ? response([{ type: 'toolCall', id: 'timed-tool', name: 'exec', arguments: { code: 'print(1)' } }])
+    : response([{ type: 'text', text: 'done' }]), { remaining: 1 }, 0, 3,
+    { reporter: value }, undefined, undefined, '', () => times.shift()!);
+  expect(await query('secret prompt', new AbortController().signal, {
+    verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 },
+  })).toBe('done');
+  expect(times).toHaveLength(0);
+  expect(value.snapshot().calls[0]).toMatchObject({ modelMs: 19, execMs: 18, verificationMs: 17, status: 'succeeded' });
+  expect(value.snapshot().totals).toMatchObject({ modelMs: 19, execMs: 18, verificationMs: 17 });
+  expect(formatActivity(value.snapshot(), true)).toContain('model 19ms / exec 18ms / verify 17ms');
+  expect(JSON.stringify(value.snapshot())).not.toContain('secret prompt');
+});
+
+test('failed and cancelled requests retain elapsed model time without exposing errors', async () => {
+  const { value } = setup();
+  const times = [0, 9, 20, 27];
+  const clock = () => times.shift()!;
+  const fail = createQuery(process.cwd(), async () => { throw new Error('private failure'); },
+    { remaining: 1 }, 0, 2, { reporter: value }, undefined, undefined, '', clock);
+  await expect(fail('private prompt', new AbortController().signal)).rejects.toThrow('private failure');
+  const abort = new AbortController();
+  const cancel = createQuery(process.cwd(), async () => {
+    abort.abort(new DOMException('private cancellation', 'AbortError'));
+    throw new DOMException('private cancellation', 'AbortError');
+  }, { remaining: 1 }, 0, 2, { reporter: value }, undefined, undefined, '', clock);
+  await expect(cancel('private prompt', abort.signal)).rejects.toThrow();
+  expect(value.snapshot().calls.map(call => [call.status, call.modelMs])).toEqual([['failed', 9], ['aborted', 7]]);
+  expect(value.snapshot().totals.modelMs).toBe(16);
+  expect(JSON.stringify(value.snapshot())).not.toMatch(/private/);
+});
+
+test('parallel phase durations are sums, not end-to-end wall time', () => {
+  let snapshot = emptyActivitySnapshot(0);
+  snapshot = reduceActivity(snapshot, { type: 'started', id: 'one', depth: 1, tier: 'smart', at: 0 });
+  snapshot = reduceActivity(snapshot, { type: 'started', id: 'two', depth: 1, tier: 'routine', at: 0 });
+  snapshot = reduceActivity(snapshot, { type: 'timing', id: 'one', phase: 'model', ms: 15, at: 15 });
+  snapshot = reduceActivity(snapshot, { type: 'timing', id: 'two', phase: 'model', ms: 15, at: 15 });
+  snapshot = reduceActivity(snapshot, { type: 'terminal', id: 'one', status: 'succeeded', at: 15 });
+  snapshot = reduceActivity(snapshot, { type: 'terminal', id: 'two', status: 'succeeded', at: 15 });
+  expect(snapshot.totals.modelMs).toBe(30);
+  expect(snapshot.totals.durationMs).toBe(30);
+  expect(snapshot.updatedAt).toBe(15);
+});

@@ -3,7 +3,7 @@ import type { AssistantMessage, Context } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { Runtime, type Query } from './runtime.ts';
 import { bash } from './bash.ts';
-import type { ActivityContext, TerminalActivityStatus } from './activity.ts';
+import type { ActivityContext, TerminalActivityStatus, TimedPhase } from './activity.ts';
 import { Scratchpad } from './scratchpad.ts';
 
 export const parameters = Type.Object({ code: Type.String({ description: 'JavaScript with top-level await. Use state for persistent variables and print() for output.' }) });
@@ -71,7 +71,7 @@ export type Complete = (context: Context, signal: AbortSignal, tier: ModelTier) 
 export function createQuery(
   cwd: string, complete: Complete, budget = { remaining: readLimits().maxCalls }, depth = 0,
   maxTurns = readLimits().maxTurns, activity?: ActivityContext, scratchpad = new Scratchpad(),
-  parentContext?: Context, inheritedText = '',
+  parentContext?: Context, inheritedText = '', clock: () => number = () => performance.now(),
 ): Query {
   return async (prompt, signal, options = {}) => {
     const tier: ModelTier = options.model ?? 'smart';
@@ -80,6 +80,11 @@ export function createQuery(
     const callId = activity?.reporter.start({ parentId: activity.parentId, depth: depth + 1, tier });
     let terminal: TerminalActivityStatus = 'failed';
     let runtime: Runtime | undefined;
+    const timed = async <T>(phase: TimedPhase, action: () => Promise<T>): Promise<T> => {
+      const started = clock();
+      try { return await action(); }
+      finally { if (callId) activity?.reporter.timing(callId, phase, Math.max(0, clock() - started)); }
+    };
     try {
       signal.throwIfAborted();
       if (depth >= 2) throw new Error('RLM recursion depth limit reached (2).');
@@ -102,7 +107,7 @@ export function createQuery(
         turn++;
         turnsThisRound++;
         if (callId) activity?.reporter.model(callId, turn);
-        const response = await completeWithDeadline(complete, conversation, signal, tier);
+        const response = await timed('model', () => completeWithDeadline(complete, conversation, signal, tier));
         if (response.stopReason === 'error' || response.stopReason === 'aborted') {
           if (response.stopReason === 'aborted') terminal = 'aborted';
           throw new Error(response.errorMessage || `Child model ${response.stopReason}`);
@@ -114,7 +119,7 @@ export function createQuery(
           if (!verification) { terminal = 'succeeded'; return answer; }
           const round = ++verificationRound;
           if (callId) activity?.reporter.verification(callId, round);
-          const failures = await runVerificationRound(cwd, verification.checks, verification.timeoutMs, signal);
+          const failures = await timed('verification', () => runVerificationRound(cwd, verification.checks, verification.timeoutMs, signal));
           signal.throwIfAborted();
           if (!failures.length) { terminal = 'succeeded'; return answer; }
           const evidence = verificationFeedback(round, verification.maxAttempts, failures);
@@ -128,11 +133,11 @@ export function createQuery(
         }
         for (const call of calls) {
           if (callId) activity?.reporter.exec(callId, ++toolCalls);
-          const result = call.name === 'exec' && typeof call.arguments.code === 'string'
-            ? await runtime.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1, maxTurns,
+          const result = await timed('exec', () => call.name === 'exec' && typeof call.arguments.code === 'string'
+            ? runtime!.exec(call.arguments.code, createQuery(cwd, complete, budget, depth + 1, maxTurns,
               activity && callId ? { reporter: activity.reporter, parentId: callId } : undefined, scratchpad,
-              conversation, externalContext), signal)
-            : { text: 'Expected exec with a string code parameter.', isError: true };
+              conversation, externalContext, clock), signal)
+            : Promise.resolve({ text: 'Expected exec with a string code parameter.', isError: true }));
           conversation.messages.push({ role: 'toolResult', toolCallId: call.id, toolName: call.name,
             content: [{ type: 'text', text: result.text }], isError: result.isError, timestamp: Date.now() });
         }

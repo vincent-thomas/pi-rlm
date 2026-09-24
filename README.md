@@ -56,6 +56,12 @@ print(state.decision);
 
 Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
+### Recursive activity timing
+
+The activity snapshots and tool display record metadata-only elapsed milliseconds for each child: modelMs times awaited provider requests (including timeout or cancellation); execMs times JavaScript exec calls; verificationMs times optional verification rounds. Values accumulate per call and across calls, including failed or aborted phases. durationMs remains each call's end-to-end elapsed wall time. Nested child model time can overlap a parent's execMs, and parallel calls overlap each other: never add phase totals to infer task wall-clock time or exclusive CPU time. Rendering rounds to whole milliseconds. No prompts, answers, code, logs, or check output are added to activity.
+
+To benchmark throughput, fix a representative workload and acceptance checks, then compare current routing with explicitly selected routine and inherit: none for independent, self-contained checks and Promise.all for genuinely parallel work. Record externally measured task start-to-finish p50/p95, correctness/review defects, cancellation and timeout rates, call counts, and activity phase totals over repeated runs. Keep the always-delegate policy and default tier unchanged; change routing only if end-to-end time improves without reducing quality. Provider latency varies, and phase totals alone are not a controlled speed benchmark.
+
 ### Model tiers
 
 On session start, the extension selects the `smart` tier for the top-level orchestrator. `llm_query` also defaults to `smart` when its model option is omitted. Child model defaults are defined in `MODEL_TIERS`: `routine` uses `gpt-6-luna` with `low` reasoning, `smart` uses `gpt-6-sol` with `medium` reasoning, and `agi` uses `gpt-6-astra` with `high` reasoning. Override either lower tier with an exact model reference (optionally suffixed with a reasoning level, such as `:high`; without a suffix, the provider's reasoning default applies):
