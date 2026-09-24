@@ -7,7 +7,7 @@ import { bash } from './bash.ts';
 import type { QueryOptions } from './rlm.ts';
 import { Scratchpad } from './scratchpad.ts';
 
-export type Query = (prompt: string, context: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
+export type Query = (prompt: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
 export interface ExecResult { text: string; isError: boolean }
 
 /** A terminable worker keeps runaway JavaScript from blocking pi's event loop. */
@@ -89,7 +89,7 @@ export class Runtime {
             const result = message.type === 'bash'
               ? await bash(message.command, this.cwd, controller.signal)
               : message.type === 'query'
-                ? await query(message.prompt, message.context, controller.signal, message.options)
+                ? await query(message.prompt, controller.signal, message.options)
                 : message.type === 'scratchpadRead'
                   ? await this.scratchpad.read(message.offset, message.len)
                   : await this.scratchpad.edit(message.oldText, message.newText);

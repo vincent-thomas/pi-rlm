@@ -71,13 +71,14 @@ const sandbox = createContext({
       return request('scratchpadEdit', { oldText, newText });
     },
   }),
-  llm_query: (prompt, context = '', options = {}) => {
-    if (typeof prompt !== 'string' || typeof context !== 'string') {
-      return locallyRejected(new Error('llm_query(prompt, context, options) requires prompt and context strings'));
+  llm_query: (prompt, options = {}) => {
+    if (typeof prompt !== 'string') {
+      return locallyRejected(new Error('llm_query(prompt, options) requires a string prompt'));
     }
     if (options === null || typeof options !== 'object' || Array.isArray(options) ||
-        (options.model !== undefined && !['routine', 'smart', 'agi'].includes(options.model))) {
-      return locallyRejected(new Error("llm_query options must be an object and options.model must be 'routine', 'smart', or 'agi'"));
+        (options.model !== undefined && !['routine', 'smart', 'agi'].includes(options.model)) ||
+        (options.inherit !== undefined && !['full', 'none'].includes(options.inherit))) {
+      return locallyRejected(new Error("llm_query options must be an object; model must be 'routine', 'smart', or 'agi'; inherit must be 'full' or 'none'"));
     }
     const verification = options.verification;
     if (verification !== undefined && (verification === null || typeof verification !== 'object' || Array.isArray(verification) ||
@@ -87,8 +88,9 @@ const sandbox = createContext({
         !Number.isFinite(verification.timeoutMs) || !Number.isInteger(verification.timeoutMs) || verification.timeoutMs < 1 || verification.timeoutMs > 3600000)) {
       return locallyRejected(new Error('llm_query options.verification requires checks (1..16 nonblank strings, at most 2048 characters each), maxAttempts (integer 1..10), and timeoutMs (integer 1..3600000).'));
     }
-    return request('query', { prompt, context, options: {
+    return request('query', { prompt, options: {
       model: options.model ?? 'smart',
+      inherit: options.inherit ?? 'full',
       ...(verification === undefined ? {} : { verification: { checks: [...verification.checks], maxAttempts: verification.maxAttempts, timeoutMs: verification.timeoutMs } }),
     } });
   },

@@ -72,7 +72,7 @@ test('worker exposes only async read/edit and shared parallel runtimes serialize
 test('scratchpad is shared through child and grandchild llm_query runtimes', async () => {
   const pad = new Scratchpad();
   const complete = async (ctx: Context) => {
-    const prompt = (ctx.messages[0] as any).content;
+    const prompt = (ctx.messages.at(-1) as any).content;
     const hasToolResult = ctx.messages.some(message => message.role === 'toolResult');
     if (prompt === 'root' && !hasToolResult) return response([{ type: 'toolCall', id: 'root-tool', name: 'exec', arguments: {
       code: "await scratchpad.edit('# Shared scratchpad\\n', 'child'); await llm_query('grand')",
@@ -83,7 +83,7 @@ test('scratchpad is shared through child and grandchild llm_query runtimes', asy
     return response([{ type: 'text', text: 'done' }]);
   };
   const query = createQuery(process.cwd(), complete, { remaining: 2 }, 0, 4, undefined, pad);
-  expect(await query('root', '', new AbortController().signal)).toBe('done');
+  expect(await query('root', new AbortController().signal)).toBe('done');
   expect(await pad.read()).toBe('grandchild');
 });
 
@@ -154,8 +154,8 @@ test('unawaited invalid local API calls do not cause unhandled rejections', asyn
     scratchpad.edit('', 'x');
     scratchpad.edit(1, 'x');
     llm_query(1);
-    llm_query('x', '', { model: 'invalid' });
-    llm_query('x', '', { verification: {} });
+    llm_query('x', { model: 'invalid' });
+    llm_query('x', { verification: {} });
     print(await scratchpad.read());
   `, unused);
   expect(first).toEqual({ text: '# Shared scratchpad\n\n', isError: false });

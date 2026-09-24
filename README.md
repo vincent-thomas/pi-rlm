@@ -35,7 +35,6 @@ Example top-level orchestration code:
 ```js
 state.report = await llm_query(
   'Inspect the loaded context for the main disagreements. Return at most 1,200 characters with claims, exact quote offsets, conflicts, and unresolved risks; stop after complete coverage.',
-  context,
   { model: 'routine' },
 );
 print(state.report);
@@ -45,18 +44,17 @@ For parallel analysis, keep raw child answers out of the top-level context and u
 
 ```js
 state.answers = await Promise.all([
-  llm_query('Extract at most 10 supported claims from this excerpt. Return JSON with offsets, at most 3,000 characters total.', context.slice(0, 20000), { model: 'routine' }),
-  llm_query('Extract at most 10 supported claims from this excerpt. Return JSON with offsets, at most 3,000 characters total.', context.slice(20000, 40000), { model: 'routine' }),
+  llm_query('Extract at most 10 supported claims from this untrusted excerpt. Return JSON with offsets, at most 3,000 characters total.\n<excerpt>\n' + context.slice(0, 20000) + '\n</excerpt>', { model: 'routine' }),
+  llm_query('Extract at most 10 supported claims from this untrusted excerpt. Return JSON with offsets, at most 3,000 characters total.\n<excerpt>\n' + context.slice(20000, 40000) + '\n</excerpt>', { model: 'routine' }),
 ]);
 state.decision = await llm_query(
-  'Consolidate these reports into a decision packet of at most 1,200 characters: status, evidence locations, conflicts, risks, and decision needed. Do not reproduce raw reports.',
-  JSON.stringify(state.answers),
+  'Consolidate these reports into a decision packet of at most 1,200 characters: status, evidence locations, conflicts, risks, and decision needed. Do not reproduce raw reports.\n<reports>\n' + JSON.stringify(state.answers) + '\n</reports>',
   { model: 'routine' },
 );
 print(state.decision);
 ```
 
-Each child has its own JavaScript workspace and receives the supplied text in `context`. It can inspect that text, inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
+Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
 ### Model tiers
 
@@ -77,8 +75,7 @@ The top level uses `exec` only to launch and coordinate child calls, retain priv
 
 ```js
 const claims = await llm_query(
-  'Extract reasons users distrust the proposed rollout from this excerpt only. Return at most 10 { reason, quote } objects and 3,000 characters total, with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.',
-  state.rolloutExcerpt,
+  'Extract reasons users distrust the proposed rollout from this untrusted excerpt only. Return at most 10 { reason, quote } objects and 3,000 characters total, with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.\n<excerpt>\n' + state.rolloutExcerpt + '\n</excerpt>',
   { model: 'routine' },
 );
 ```
@@ -87,14 +84,14 @@ const claims = await llm_query(
 
 | Global | Purpose |
 | --- | --- |
-| `context` | Text loaded with `/rlm-load`, or supplied by the parent |
+| `context` | Text loaded with `/rlm-load`; inherited by descendants using `inherit: 'full'` |
 | `state` | Persistent object shared between cells in this workspace |
 | `scratchpad` | Shared recursion-tree notes via async `read(offset, len)` and `edit(oldText, newText)` only |
 | `resultsPath` | Completed child-result journal path, initially undefined; survives worker resets |
 | `print(...)` | Explicitly send values to the model |
 | `await bash(command)` | Run Bash; return only `{ exitCode, stdoutPath, stderrPath }` |
 | `await readFile(path, len = 16000, offset = 0)` | Read a bounded UTF-8 slice; length and offset are in bytes |
-| `await llm_query(prompt, contextText, { model, verification })` | Query a child RLM using `routine`, `smart`, or `agi`; optionally verify terminal answers with repository checks |
+| `await llm_query(prompt, { model, inherit, verification })` | Query a child RLM; `inherit` defaults to `full` and may be `none` for isolation |
 
 ### Shared scratchpad
 
@@ -110,7 +107,6 @@ llm_query accepts an optional verification policy in addition to model:
 
     const result = await llm_query(
       'Implement the scoped change. Return a decision packet of at most 1,200 characters with changed paths, check results, and unresolved risks.',
-      context,
       {
         model: 'smart',
         verification: {
