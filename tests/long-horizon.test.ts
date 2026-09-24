@@ -296,3 +296,28 @@ test('restoration refuses forged symlink parents without touching outside user d
   await expect(restoreProtected(workspace, jobDir, ['bench/correct.txt'])).rejects.toThrow('Protected path has symlink parent: bench');
   expect(await readFile(join(outside, 'correct.txt'), 'utf8')).toBe('private\n');
 });
+
+test.each([
+  ['dead supervisor', 2147483647, true],
+  ['live supervisor still initializing', process.pid, false],
+])('handles missing-state startup for %s', async (_scenario, pid, dead) => {
+  const { root, workspace, jobDir } = await guardrailFixture('echo 120 > score.txt');
+  await mkdir(jobDir, { recursive: true });
+  await writeFile(join(jobDir, 'metadata.json'), JSON.stringify({ sourceWorkspace: workspace, branch: 'test-branch' }));
+  await writeFile(join(jobDir, 'supervisor.json'), JSON.stringify({ pid, startedAt: new Date(Date.now() - 120_000).toISOString() }));
+  const messages: string[] = [];
+  const pi = { sendUserMessage: (text: string) => { messages.push(text); } } as any;
+  await notifyCompleted(pi, workspace, root);
+  await notifyCompleted(pi, workspace, root);
+  expect(messages).toHaveLength(dead ? 1 : 0);
+  const failurePath = join(jobDir, 'failure.json');
+  if (dead) {
+    expect(messages[0]).toContain('status failed');
+    expect(messages[0]).toContain('before creating job state');
+    expect(JSON.parse(await readFile(failurePath, 'utf8')).status).toBe('failed');
+    expect(await readFile(join(jobDir, 'notification-sent'), 'utf8')).toBeTruthy();
+  } else {
+    await expect(readFile(failurePath, 'utf8')).rejects.toThrow();
+    await expect(readFile(join(jobDir, 'notification-sent'), 'utf8')).rejects.toThrow();
+  }
+});

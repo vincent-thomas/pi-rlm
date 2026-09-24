@@ -44,8 +44,30 @@ export async function notifyCompleted(pi: Pick<ExtensionAPI, 'sendUserMessage'>,
         if (failure) {
           message = 'status failed. Error: ' + failure.error;
         } else {
-          const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as BenchmarkJobState;
-          if (state.status === 'running') {
+          let state: BenchmarkJobState | undefined;
+          try { state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as BenchmarkJobState; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          if (!state) {
+            // A live supervisor may still be initializing; do not fail it on elapsed time alone.
+            let supervisor: { pid?: number };
+            try { supervisor = JSON.parse(await readFile(join(dir, 'supervisor.json'), 'utf8')) as { pid?: number }; }
+            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+            if (!Number.isSafeInteger(supervisor.pid) || supervisor.pid! <= 0) continue;
+            try { process.kill(supervisor.pid!, 0); continue; }
+            catch (error) {
+              if ((error as NodeJS.ErrnoException).code === 'EPERM') continue;
+              if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+            }
+            // A final state may have arrived while checking liveness.
+            try { await readFile(join(dir, 'state.json')); continue; }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            let latestFailure: { error: string } | undefined;
+            try { latestFailure = JSON.parse(await readFile(join(dir, 'failure.json'), 'utf8')) as { error: string }; }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+            const reason = latestFailure?.error ?? 'Detached supervisor exited before creating job state.';
+            if (!latestFailure) await writeFile(join(dir, 'failure.json'), JSON.stringify({ status: 'failed', error: reason, failedAt: new Date().toISOString() }) + '\n', { mode: 0o600, flag: 'wx' });
+            message = 'status failed. Error: ' + reason;
+          } else if (state.status === 'running') {
             let pid: number | undefined;
             try {
               const supervisor = JSON.parse(await readFile(join(dir, 'supervisor.json'), 'utf8')) as { pid?: number };
