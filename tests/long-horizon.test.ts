@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { promptFor, runBenchmarkJob } from '../src/long-horizon/supervisor.ts';
 import { longHorizonInstructions, notifyCompleted } from '../src/long-horizon/extension.ts';
+import { restoreProtected, snapshotProtected } from '../src/long-horizon/protected.ts';
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -235,4 +236,63 @@ test.each(['dead supervisor', 'expired job'])('notifies once for a %s with stale
   expect(messages[0]).toContain('status failed');
   expect(messages[0]).toContain(scenario === 'dead supervisor' ? 'no longer running' : 'expired');
   expect(JSON.parse(await readFile(join(jobDir, 'failure.json'), 'utf8')).status).toBe('failed');
+});
+
+
+test('rejects an ignored protected symlink to mutable data outside protected paths', async () => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  await writeFile(join(workspace, '.gitignore'), 'bench/cache/\n');
+  await command(workspace, 'git', ['add', '.gitignore']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'ignore']);
+  await mkdir(join(workspace, 'bench/cache'));
+  const outside = join(root, 'external-input.txt');
+  await writeFile(outside, 'original\n');
+  await symlink(outside, join(workspace, 'bench/cache/alias'));
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Protected baseline contains symlink: bench/cache/alias');
+  expect(await readFile(outside, 'utf8')).toBe('original\n');
+});
+
+test('rejects a tracked protected symlink without following its target', async () => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  const outside = join(root, 'external-input.txt');
+  await writeFile(outside, 'original\n');
+  await symlink(outside, join(workspace, 'bench/alias'));
+  await command(workspace, 'git', ['add', 'bench/alias']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'alias']);
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Protected baseline contains symlink: bench/alias');
+  expect(await readFile(outside, 'utf8')).toBe('original\n');
+});
+
+test('rejects an injected ignored protected symlink and leaves its target intact', async () => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  // The agent script uses the real target, not a preexisting baseline link.
+  const outside = join(root, 'outside.txt');
+  await writeFile(outside, 'user data\n');
+  await writeFile(config.agent.command, '#!/bin/sh\nset -e\necho 120 > score.txt\nmkdir -p bench/cache\nln -s "' + outside + '" bench/cache/injected\n');
+  await writeFile(join(workspace, '.gitignore'), 'bench/cache/\n');
+  await command(workspace, 'git', ['add', '.gitignore']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'ignore']);
+  const state = await runBenchmarkJob(config, jobDir);
+  expect(state.iterations[0]?.outcome).toBe('rejected');
+  expect(state.iterations[0]?.reason).toContain('bench/cache');
+  expect(await readFile(outside, 'utf8')).toBe('user data\n');
+  await expect(readFile(join(workspace, 'bench/cache/injected'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+test('restoration refuses forged symlink parents without touching outside user data', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rlm-restore-symlink-'));
+  temporary.push(root);
+  const workspace = join(root, 'workspace');
+  const jobDir = join(root, 'job');
+  const outside = join(root, 'outside');
+  await mkdir(join(workspace, 'bench'), { recursive: true });
+  await mkdir(outside);
+  await mkdir(jobDir);
+  await writeFile(join(workspace, 'bench/correct.txt'), 'yes\n');
+  await writeFile(join(outside, 'correct.txt'), 'private\n');
+  await snapshotProtected(workspace, jobDir, ['bench/correct.txt']);
+  await rm(join(workspace, 'bench'), { recursive: true });
+  await symlink(outside, join(workspace, 'bench'));
+  await expect(restoreProtected(workspace, jobDir, ['bench/correct.txt'])).rejects.toThrow('Protected path has symlink parent: bench');
+  expect(await readFile(join(outside, 'correct.txt'), 'utf8')).toBe('private\n');
 });
