@@ -56,6 +56,8 @@ const sandbox = createContext({
     } finally { activeReads--; }
   },
   bash: command => request('bash', { command }),
+  gitPreflight: () => request('gitPreflight', {}),
+  validateClaims: claims => request('validateClaims', { claims }),
   scratchpad: Object.freeze({
     read: (offset = 0, len = 16000) => request('scratchpadRead', { offset, len }),
     edit: (oldText, newText) => {
@@ -96,7 +98,7 @@ const sandbox = createContext({
   },
 });
 parentPort.on('message', async message => {
-  if (message.type === 'queryResult' || message.type === 'bashResult' || message.type === 'scratchpadResult') {
+  if (message.type === 'queryResult' || message.type === 'bashResult' || message.type === 'scratchpadResult' || message.type === 'gitResult') {
     if (message.resultsPath) sandbox.resultsPath = message.resultsPath;
     const waiter = pending.get(message.id);
     pending.delete(message.id);
@@ -109,7 +111,7 @@ parentPort.on('message', async message => {
   output = ''; truncated = false;
   try {
     await new Script(`(async () => {\n${message.code}\n})()`, { filename: 'rlm-exec.js' }).runInContext(sandbox);
-    if (pending.size || activeReads) throw new Error('Await every bash, readFile, scratchpad operation, and llm_query call before ending the cell.');
+    if (pending.size || activeReads) throw new Error('Await every bash, readFile, scratchpad, git helper, and llm_query call before ending the cell.');
     parentPort.postMessage({ type: 'result', text: output + (truncated ? '\n[Output truncated; print smaller slices.]' : ''), isError: false });
   } catch (error) {
     parentPort.postMessage({ type: 'result', text: output + '\n' + String(error), isError: true, reset: pending.size > 0 || activeReads > 0 });
