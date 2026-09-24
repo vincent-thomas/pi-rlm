@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { runProcess } from './process.ts';
 import { loadState, saveState, statePath, withJobLock } from './store.ts';
@@ -12,7 +12,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.once('error', reject);
-    child.once('close', code => code === 0 ? resolveResult(stdout.trim()) : reject(new Error('git ' + args.join(' ') + ': ' + stderr.trim())));
+    child.once('close', code => code === 0 ? resolveResult(stdout.replace(/\n$/, '')) : reject(new Error('git ' + args.join(' ') + ': ' + stderr.trim())));
   });
 }
 
@@ -24,6 +24,56 @@ function validateConfig(config: BenchmarkJobConfig): void {
   if (!Number.isFinite(config.targetImprovement) || config.targetImprovement <= 0) throw new Error('targetImprovement must be positive.');
   if (!config.agent.command || !config.verifier.command) throw new Error('Agent and verifier commands are required.');
   if (!config.protectedPaths.length || config.protectedPaths.some(path => !path || path.startsWith('/') || path.includes('..'))) throw new Error('At least one safe relative protected path is required.');
+}
+
+// Local verifier entrypoints must be protected: otherwise the agent can forge a score.
+async function validateVerifier(config: BenchmarkJobConfig): Promise<void> {
+  const args = config.verifier.args ?? [];
+  if (args.some(arg => ['-c', '-e', '--eval', '--execute', '--command'].includes(arg)) ||
+      (/^(sh|bash|zsh|dash)$/.test(config.verifier.command.split('/').at(-1) ?? '') &&
+       args.some(arg => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg)))) {
+    throw new Error('Inline verifier code is not allowed; use a protected verifier entrypoint.');
+  }
+  for (const input of [config.verifier.command, ...args]) {
+    if (input.startsWith('-')) continue;
+    const path = resolve(config.workspace, input);
+    let canonical: string;
+    try { canonical = await realpath(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    const local = relative(config.workspace, canonical);
+    const supplied = relative(config.workspace, path);
+    const within = (name: string) => !name || (!name.startsWith('..') && !isAbsolute(name));
+    if (within(local) || within(supplied)) {
+      const named = within(supplied) ? supplied : local;
+      if (!config.protectedPaths.some(protectedPath => named === protectedPath || named.startsWith(protectedPath + '/')) ||
+          !await git(config.workspace, ['ls-files', '--error-unmatch', '--', named]).then(() => true, () => false)) {
+        throw new Error('Workspace verifier input must be a tracked protected path: ' + input);
+      }
+    }
+  }
+}
+
+// NUL-delimited porcelain covers staged, unstaged, renamed and untracked paths.
+async function changedPaths(workspace: string): Promise<string[]> {
+  const output = await git(workspace, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const entries = output.split('\0');
+  const paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry) continue;
+    paths.push(entry.slice(3));
+    if (entry[0] === 'R' || entry[1] === 'R' || entry[0] === 'C' || entry[1] === 'C') paths.push(entries[++i] ?? '');
+  }
+  return paths;
+}
+
+async function protectedChange(config: BenchmarkJobConfig): Promise<string | undefined> {
+  return (await changedPaths(config.workspace)).find(changed =>
+    config.protectedPaths.some(path => changed === path || changed.startsWith(path + '/'))
+  );
 }
 
 async function verify(config: BenchmarkJobConfig, jobDir: string, label: string, deadline: number) {
@@ -64,6 +114,7 @@ async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: 
   for (const path of config.protectedPaths) {
     if (!await git(config.workspace, ['ls-files', '--', path])) throw new Error('Protected path is not tracked: ' + path);
   }
+  await validateVerifier(config);
   const baseline = await verify(config, jobDir, 'baseline', deadline);
   if (!baseline.value || baseline.error) throw new Error(baseline.error ?? 'Baseline verification failed.');
   if (!baseline.value.valid) throw new Error('Baseline is invalid: ' + (baseline.value.summary ?? 'no summary'));
@@ -82,7 +133,7 @@ async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: 
 
 async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<BenchmarkJobState> {
   validateConfig(config);
-  config = { ...config, workspace: resolve(config.workspace) };
+  config = { ...config, workspace: await realpath(resolve(config.workspace)) };
   const deadline = Date.parse(config.deadlineAt);
   let state: BenchmarkJobState;
   try { state = await loadState(jobDir); }
@@ -92,6 +143,7 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
   }
   if (state.status !== 'running') return state;
   await restore(config.workspace, state.bestCommit);
+  await validateVerifier(config);
   if (state.activeIteration) {
     const active = state.activeIteration;
     state.iterations.push({ number: active.number, startedAt: active.startedAt, finishedAt: new Date().toISOString(), outcome: 'error', reason: 'Interrupted invocation recovered.' });
@@ -112,10 +164,9 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
       record.reason = head !== state.bestCommit ? 'Agent changed Git history.' : agent.timedOut ? 'Agent timed out.' : 'Agent exited with code ' + agent.exitCode + '.';
       await restore(config.workspace, state.bestCommit);
     } else {
-      const changedPaths = (await git(config.workspace, ['diff', '--name-only', state.bestCommit])).split('\n').filter(Boolean);
-      const protectedChange = changedPaths.find(changed => config.protectedPaths.some(path => changed === path || changed.startsWith(path + '/')));
-      if (protectedChange) {
-        record.reason = 'Agent modified protected benchmark path: ' + protectedChange;
+      const violation = await protectedChange(config);
+      if (violation) {
+        record.reason = 'Agent modified protected benchmark path: ' + violation;
         record.outcome = 'rejected';
         await restore(config.workspace, state.bestCommit);
         record.finishedAt = new Date().toISOString();
@@ -127,9 +178,14 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
       state.activeIteration.phase = 'verifying';
       await saveState(jobDir, state);
       const checked = await verify(config, jobDir, 'iteration-' + number, deadline);
+      const verifierViolation = await protectedChange(config);
       record.verifierStdoutPath = checked.process.stdoutPath;
       record.verifierStderrPath = checked.process.stderrPath;
-      if (checked.error || !checked.value?.valid) {
+      if (verifierViolation) {
+        record.reason = 'Verifier modified protected benchmark path: ' + verifierViolation;
+        record.outcome = 'rejected';
+        await restore(config.workspace, state.bestCommit);
+      } else if (checked.error || !checked.value?.valid) {
         record.reason = checked.error ?? ('Correctness verification failed: ' + (checked.value?.summary ?? 'no summary'));
         record.outcome = 'rejected';
         await restore(config.workspace, state.bestCommit);
@@ -139,6 +195,8 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
       } else {
         record.score = checked.value.score; record.reason = 'Verified strict improvement.'; record.outcome = 'accepted';
         await git(config.workspace, ['add', '-A']);
+        const stagedViolation = await protectedChange(config);
+        if (stagedViolation) throw new Error('Protected benchmark path staged during acceptance: ' + stagedViolation);
         const changed = await git(config.workspace, ['status', '--porcelain']);
         if (!changed) {
           record.outcome = 'rejected'; record.reason = 'Score changed without a workspace change.';

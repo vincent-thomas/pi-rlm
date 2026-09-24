@@ -26,24 +26,26 @@ async function capture(command: string, args: string[], cwd: string): Promise<st
 export const longHorizonInstructions = 
   'When the user gives an explicit measurable optimization target that may require repeated attempts (for example, improve a benchmark by 10%), delegate discovery of the existing canonical verifier and protected benchmark/correctness paths, then start the autonomous long-horizon supervisor with start_long_horizon instead of asking the user to manage iterations. Use compact worker recommendations to choose a finite deadline. Do not inspect those repository artifacts directly, use this tool for ordinary tasks, or invoke it from a prompt identifying the agent as an autonomous iteration worker.';
 
-export function registerLongHorizon(pi: ExtensionAPI) {
-  let poller: ReturnType<typeof setInterval> | undefined;
-  const notifyCompleted = async (cwd: string) => {
+export async function notifyCompleted(pi: Pick<ExtensionAPI, 'sendUserMessage'>, cwd: string, root = jobsRoot): Promise<void> {
     let entries: string[];
-    try { entries = await readdir(jobsRoot); } catch { return; }
+    try { entries = await readdir(root); } catch { return; }
     for (const name of entries) {
-      const dir = join(jobsRoot, name);
+      const dir = join(root, name);
       try {
         const metadata = JSON.parse(await readFile(join(dir, 'metadata.json'), 'utf8')) as { sourceWorkspace: string; branch: string };
         if (resolve(metadata.sourceWorkspace) !== resolve(cwd)) continue;
         let message: string;
-        try {
+        // failure.json wins over a stale 'running' state if the CLI crashed while
+        // updating state.json, or initialization failed before state was created.
+        let failure: { error: string } | undefined;
+        try { failure = JSON.parse(await readFile(join(dir, 'failure.json'), 'utf8')) as { error: string }; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        if (failure) {
+          message = 'status failed. Error: ' + failure.error;
+        } else {
           const state = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as BenchmarkJobState;
           if (state.status === 'running') continue;
           message = 'status ' + state.status + '. Best score: ' + state.bestScore + '; target: ' + state.targetScore + '.';
-        } catch {
-          const failure = JSON.parse(await readFile(join(dir, 'failure.json'), 'utf8')) as { error: string };
-          message = 'status failed. Error: ' + failure.error;
         }
         const marker = join(dir, 'notification-sent');
         try { await readFile(marker); continue; } catch {}
@@ -51,11 +53,13 @@ export function registerLongHorizon(pi: ExtensionAPI) {
         await writeFile(marker, new Date().toISOString() + '\n', { mode: 0o600 });
       } catch { /* A partially created or unrelated job is not ready. */ }
     }
-  };
+}
 
+export function registerLongHorizon(pi: ExtensionAPI) {
+  let poller: ReturnType<typeof setInterval> | undefined;
   pi.on('session_start', async (_event, ctx) => {
-    await notifyCompleted(ctx.cwd);
-    poller = setInterval(() => { void notifyCompleted(ctx.cwd); }, 5000);
+    await notifyCompleted(pi, ctx.cwd);
+    poller = setInterval(() => { void notifyCompleted(pi, ctx.cwd); }, 5000);
     poller.unref();
   });
   pi.on('session_shutdown', () => { if (poller) clearInterval(poller); poller = undefined; });
@@ -66,7 +70,7 @@ export function registerLongHorizon(pi: ExtensionAPI) {
     description: 'Start a durable autonomous optimization job. Use only for an explicit measurable benchmark target; no follow-up input is required.',
     parameters: Type.Object({
       objective: Type.String(),
-      verifierCommand: Type.String({ description: 'Executable for the canonical verifier. It must print one JSON object: {valid:boolean,score:number,summary?:string}.' }),
+      verifierCommand: Type.String({ description: 'Trusted canonical verifier executable. Workspace-local verifier scripts and their dependencies must be tracked protected paths. It must print {valid:boolean,score:number,summary?:string}.' }),
       verifierArgs: Type.Optional(Type.Array(Type.String())),
       targetImprovement: Type.Optional(Type.Number({ minimum: 0.001, maximum: 10 })),
       deadlineMinutes: Type.Optional(Type.Number({ minimum: 1, maximum: 10080 })),

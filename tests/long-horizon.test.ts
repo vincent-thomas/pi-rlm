@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { promptFor, runBenchmarkJob } from '../src/long-horizon/supervisor.ts';
-import { longHorizonInstructions } from '../src/long-horizon/extension.ts';
+import { longHorizonInstructions, notifyCompleted } from '../src/long-horizon/extension.ts';
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -83,4 +83,98 @@ test('autonomously reaches a verified benchmark target across fresh invocations'
   const persisted = JSON.parse(await readFile(join(jobDir, 'state.json'), 'utf8'));
   expect(persisted.status).toBe('succeeded');
   expect(await command(workspace, 'git', ['diff', '--exit-code'])).toBeUndefined();
+});
+
+async function guardrailFixture(agentBody: string) {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rlm-guardrails-'));
+  temporary.push(root);
+  const workspace = join(root, 'workspace');
+  const jobDir = join(root, 'job');
+  await mkdir(join(workspace, 'bench'), { recursive: true });
+  await writeFile(join(workspace, 'bench', 'correct.txt'), 'yes\n');
+  await writeFile(join(workspace, 'score.txt'), '100\n');
+  await command(workspace, 'git', ['init', '-q']);
+  await command(workspace, 'git', ['add', '.']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'baseline']);
+  const agent = join(root, 'agent.sh');
+  await writeFile(agent, '#!/bin/sh\nset -e\n' + agentBody + '\n');
+  await chmod(agent, 0o700);
+  const verifier = join(root, 'verify.sh');
+  await writeFile(verifier, '#!/bin/sh\nprintf \'{"valid":true,"score":%s}\\n\' "$(cat score.txt)"\n');
+  await chmod(verifier, 0o700);
+  const config: Parameters<typeof runBenchmarkJob>[0] = {
+    version: 1, objective: 'Improve', workspace,
+    deadlineAt: new Date(Date.now() + 15_000).toISOString(),
+    maxIterations: 1, targetImprovement: 0.10, protectedPaths: ['bench'],
+    agent: { command: agent }, verifier: { command: verifier },
+  };
+  return { root, workspace, jobDir, config };
+}
+
+test.each([
+  ['untracked addition', 'echo 120 > score.txt\necho fake > bench/extra.txt', 'bench/extra.txt'],
+  ['staged addition', 'echo 120 > score.txt\necho fake > bench/extra.txt\ngit add bench/extra.txt', 'bench/extra.txt'],
+  ['unstaged modification', 'echo 120 > score.txt\necho fake > bench/correct.txt', 'bench/correct.txt'],
+  ['staged modification', 'echo 120 > score.txt\necho fake > bench/correct.txt\ngit add bench/correct.txt', 'bench/correct.txt'],
+  ['rename', 'echo 120 > score.txt\ngit mv bench/correct.txt moved.txt', 'bench/correct.txt'],
+])('rejects protected %s', async (_label, agentBody, path) => {
+  const { workspace, jobDir, config } = await guardrailFixture(agentBody);
+  const state = await runBenchmarkJob(config, jobDir);
+  expect(state.iterations[0]?.outcome).toBe('rejected');
+  expect(state.iterations[0]?.reason).toContain(path);
+  expect(state.bestScore).toBe(100);
+  expect((await readFile(join(workspace, 'score.txt'), 'utf8')).trim()).toBe('100');
+});
+
+test('rejects an unprotected workspace verifier entrypoint', async () => {
+  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  const verifier = join(workspace, 'verify.sh');
+  await writeFile(verifier, '#!/bin/sh\necho \'{"valid":true,"score":999}\'\n');
+  await chmod(verifier, 0o700);
+  await command(workspace, 'git', ['add', 'verify.sh']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'verifier']);
+  config.verifier.command = './verify.sh';
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Workspace verifier input must be a tracked protected path');
+});
+
+test('rejects tampering with a protected workspace verifier', async () => {
+  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt\necho tampered >> verify.sh');
+  const verifier = join(workspace, 'verify.sh');
+  await writeFile(verifier, '#!/bin/sh\nprintf \'{"valid":true,"score":%s}\\n\' "$(cat score.txt)"\n');
+  await chmod(verifier, 0o700);
+  await command(workspace, 'git', ['add', 'verify.sh']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'verifier']);
+  config.protectedPaths.push('verify.sh');
+  config.verifier.command = './verify.sh';
+  const state = await runBenchmarkJob(config, jobDir);
+  expect(state.iterations[0]?.outcome).toBe('rejected');
+  expect(state.iterations[0]?.reason).toContain('verify.sh');
+  expect(state.bestScore).toBe(100);
+});
+
+test('CLI persists terminal failure and notifier handles stale running state', async () => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  config.agent.command = join(root, 'missing-agent');
+  const configPath = join(root, 'config.json');
+  await writeFile(configPath, JSON.stringify(config));
+  const cli = join(import.meta.dir, '..', 'src', 'long-horizon', 'cli.ts');
+  await expect(command(root, 'bun', [cli, configPath, jobDir])).rejects.toThrow();
+  const state = JSON.parse(await readFile(join(jobDir, 'state.json'), 'utf8'));
+  expect(state.status).toBe('failed');
+  expect(JSON.parse(await readFile(join(jobDir, 'failure.json'), 'utf8')).status).toBe('failed');
+  state.status = 'running'; // Simulate a crash between writing failure.json and updating state.json.
+  await writeFile(join(jobDir, 'state.json'), JSON.stringify(state));
+  await writeFile(join(jobDir, 'metadata.json'), JSON.stringify({ sourceWorkspace: workspace, branch: 'test-branch' }));
+  const messages: string[] = [];
+  const pi = { sendUserMessage: (text: string) => { messages.push(text); } } as any;
+  await notifyCompleted(pi, workspace, root);
+  await notifyCompleted(pi, workspace, root);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toContain('status failed');
+});
+
+test('rejects shell inline verifier code that can load unprotected workspace scripts', async () => {
+  const { jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  config.verifier = { command: 'sh', args: ['-lc', './unprotected.sh'] };
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('Inline verifier code is not allowed');
 });

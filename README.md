@@ -193,7 +193,7 @@ The tool creates an isolated Git worktree and branch, then launches a detached s
 
 Durable job state and logs live under `~/.pi/agent/rlm-jobs/<job-id>/`; accepted changes live on the reported `rlm/<job-id>` branch. If Pi remains open, the extension reports completion automatically. Otherwise it reports completed jobs when a session for the source repository next starts.
 
-The verifier must be deterministic enough to compare runs and print exactly one JSON object:
+The verifier command must be trusted: workspace-local executable/script arguments must be tracked and listed under protected paths. Also protect any manifests, imported helpers, and benchmark inputs the verifier relies on. Inline code flags are disallowed. This check is not a sandbox: do not run an adversarial agent with access to trusted verifier files outside the worktree. The verifier must be deterministic enough to compare runs and print exactly one JSON object:
 
 ```json
 {"valid":true,"score":123.4,"summary":"tests passed"}
