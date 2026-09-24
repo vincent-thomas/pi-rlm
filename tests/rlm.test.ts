@@ -162,7 +162,14 @@ test('verification options are validated and forwarded only when explicitly requ
     async (_prompt, _signal, options) => { seen.push(options); return 'ok'; });
   expect(good.text).toBe('ok\n');
   expect(seen[0]).toEqual({ model: 'smart', inherit: 'full', verification: { checks: ['true'], maxAttempts: 2, timeoutMs: 50 } });
-  for (const verification of [null, {}, { checks: [], maxAttempts: 1, timeoutMs: 1 }, { checks: [' '], maxAttempts: 1, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 0, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 1, timeoutMs: 1.5 }]) {
+  const concurrent = await repl.exec('print(await llm_query("x", { verification: { checks: ["true", "true"], maxAttempts: 1, timeoutMs: 50, concurrency: { maxConcurrent: 2, independentReadOnly: true } } }))',
+    async (_prompt, _signal, options) => { seen.push(options); return 'ok'; });
+  expect(concurrent.text).toBe('ok\n');
+  expect(seen[1]?.verification?.concurrency).toEqual({ maxConcurrent: 2, independentReadOnly: true });
+  for (const verification of [null, {}, { checks: [], maxAttempts: 1, timeoutMs: 1 }, { checks: [' '], maxAttempts: 1, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 0, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 1, timeoutMs: 1.5 },
+    { checks: ['true'], maxAttempts: 1, timeoutMs: 1, concurrency: { maxConcurrent: 2 } },
+    { checks: ['true'], maxAttempts: 1, timeoutMs: 1, concurrency: { maxConcurrent: 5, independentReadOnly: true } },
+    { checks: ['true'], maxAttempts: 1, timeoutMs: 1, concurrency: { maxConcurrent: 1, independentReadOnly: true } }]) {
     const code = 'await llm_query("x", { verification: ' + JSON.stringify(verification) + ' })';
     expect((await repl.exec(code, unused)).isError).toBe(true);
   }

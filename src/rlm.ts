@@ -47,13 +47,15 @@ export interface VerificationOptions {
   checks: string[];
   maxAttempts: number;
   timeoutMs: number;
+  /** Only independent, read-only checks may run concurrently. */
+  concurrency?: { maxConcurrent: number; independentReadOnly: true };
 }
 export type InheritMode = 'full' | 'none';
 export interface QueryOptions { model?: ModelTier; inherit?: InheritMode; verification?: VerificationOptions }
 
 export const instructions = `You are operating as part of a recursive language model (RLM). Use exec according to your role: the top level orchestrates bounded child work, while delegated workers inspect and process context and artifacts.
 exec runs JavaScript, NOT shell commands. Top-level await is supported.
-Globals: context (inherited loaded text), state (persistent object), scratchpad, print(...values), bash(command), readFile(path, len = 16000, offset = 0), gitPreflight(), validateClaims(claims), llm_query(prompt, { model: 'routine' | 'smart' | 'agi', inherit: 'full' | 'none', verification?: { checks: string[], maxAttempts: number, timeoutMs: number } }).
+Globals: context (inherited loaded text), state (persistent object), scratchpad, print(...values), bash(command), readFile(path, len = 16000, offset = 0), gitPreflight(), validateClaims(claims), llm_query(prompt, { model: 'routine' | 'smart' | 'agi', inherit: 'full' | 'none', verification?: { checks: string[], maxAttempts: number, timeoutMs: number, concurrency?: { maxConcurrent: number, independentReadOnly: true } } }).
 bash runs a command in pi's working directory and returns ONLY { exitCode, stdoutPath, stderrPath }. Output streams go directly to separate log files, never into the model prompt automatically. Nonzero exit codes are returned, not thrown. Use foreground commands and await them.
 gitPreflight() opt-in returns a compact read-only snapshot of local branch, HEAD, dirty paths and worktrees; it does not stash, reset or create worktrees. validateClaims({ branch?, head?, pr?: { number?, url?, headBranch? } }) checks local identifiers and PR-number/URL consistency, not remote PR existence or whether any test/code claim is true. Both are async and must be awaited.
 readFile reads a UTF-8 slice using byte length and byte offset, relative paths resolve from pi's working directory. Maximum len is 1048576 bytes; EOF returns an empty string. Byte boundaries may split multibyte characters.
@@ -121,7 +123,7 @@ export function createQuery(
           if (!verification) { terminal = 'succeeded'; return answer; }
           const round = ++verificationRound;
           if (callId) activity?.reporter.verification(callId, round);
-          const failures = await timed('verification', () => runVerificationRound(cwd, verification.checks, verification.timeoutMs, signal));
+          const failures = await timed('verification', () => runVerificationRound(cwd, verification.checks, verification.timeoutMs, signal, verification.concurrency?.maxConcurrent ?? 1));
           signal.throwIfAborted();
           if (!failures.length) { terminal = 'succeeded'; return answer; }
           const evidence = verificationFeedback(round, verification.maxAttempts, failures);
@@ -180,7 +182,7 @@ function validateVerification(value: QueryOptions['verification']): Verification
   if (value === undefined) return undefined;
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     throw new Error('llm_query options.verification must be an object.');
-  const { checks, maxAttempts, timeoutMs } = value as VerificationOptions;
+  const { checks, maxAttempts, timeoutMs, concurrency } = value as VerificationOptions;
   if (!Array.isArray(checks) || checks.length < 1 || checks.length > MAX_VERIFICATION_CHECKS ||
       checks.some(check => typeof check !== 'string' || !check.trim() || check.length > MAX_VERIFICATION_CHECK_LENGTH))
     throw new Error('llm_query verification.checks must be a nonempty array of at most ' + MAX_VERIFICATION_CHECKS + ' nonblank strings, each at most ' + MAX_VERIFICATION_CHECK_LENGTH + ' characters.');
@@ -188,37 +190,53 @@ function validateVerification(value: QueryOptions['verification']): Verification
     throw new Error('llm_query verification.maxAttempts must be a positive integer no greater than ' + MAX_VERIFICATION_ATTEMPTS + '.');
   if (!Number.isFinite(timeoutMs) || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_VERIFICATION_TIMEOUT_MS)
     throw new Error('llm_query verification.timeoutMs must be a positive integer no greater than ' + MAX_VERIFICATION_TIMEOUT_MS + '.');
-  return { checks: [...checks], maxAttempts, timeoutMs };
+  if (concurrency !== undefined && (concurrency === null || typeof concurrency !== 'object' || Array.isArray(concurrency) ||
+      concurrency.independentReadOnly !== true || !Number.isInteger(concurrency.maxConcurrent) ||
+      concurrency.maxConcurrent < 2 || concurrency.maxConcurrent > 4))
+    throw new Error('llm_query verification.concurrency requires independentReadOnly: true and maxConcurrent from 2 to 4.');
+  return { checks: [...checks], maxAttempts, timeoutMs, ...(concurrency === undefined ? {} : { concurrency: { maxConcurrent: concurrency.maxConcurrent, independentReadOnly: true } }) };
 }
 
-interface VerificationFailure { check: string; status: number | 'timeout' | 'error'; stdoutPath: string; stderrPath: string }
-async function runVerificationRound(cwd: string, checks: string[], timeoutMs: number, parent: AbortSignal): Promise<VerificationFailure[]> {
-  const failures: VerificationFailure[] = [];
-  for (const check of checks) {
-    parent.throwIfAborted();
+interface VerificationFailure { index: number; check: string; status: number | 'timeout' | 'error'; stdoutPath: string; stderrPath: string }
+export async function runVerificationRound(cwd: string, checks: string[], timeoutMs: number, parent: AbortSignal, maxConcurrent = 1, runner: typeof bash = bash): Promise<VerificationFailure[]> {
+  const failures: (VerificationFailure | undefined)[] = new Array(checks.length);
+  let next = 0;
+  const runCheck = async (index: number): Promise<void> => {
+    const check = checks[index]!;
+    if (parent.aborted) return;
     const controller = new AbortController();
     let timedOut = false;
     const abort = () => controller.abort(parent.reason);
     parent.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(new Error('Verification check timed out after ' + timeoutMs + 'ms.')); }, timeoutMs);
     try {
-      const result = await bash(check, cwd, controller.signal);
+      const result = await runner(check, cwd, controller.signal);
       parent.throwIfAborted();
-      if (result.exitCode !== 0) failures.push({ check, status: result.exitCode, stdoutPath: result.stdoutPath, stderrPath: result.stderrPath });
+      if (result.exitCode !== 0) failures[index] = { index, check, status: result.exitCode, stdoutPath: result.stdoutPath, stderrPath: result.stderrPath };
     } catch (error) {
-      if (parent.aborted) parent.throwIfAborted();
+      if (parent.aborted) return;
       const detail = error as Error & { stdoutPath?: string; stderrPath?: string };
-      failures.push({ check, status: timedOut ? 'timeout' : 'error', stdoutPath: detail.stdoutPath ?? '(unavailable)', stderrPath: detail.stderrPath ?? '(unavailable)' });
+      failures[index] = { index, check, status: timedOut ? 'timeout' : 'error', stdoutPath: detail.stdoutPath ?? '(unavailable)', stderrPath: detail.stderrPath ?? '(unavailable)' };
     } finally {
       clearTimeout(timer);
       parent.removeEventListener('abort', abort);
     }
-  }
-  return failures;
+  };
+  const worker = async () => {
+    while (!parent.aborted && next < checks.length) {
+      const index = next++;
+      await runCheck(index);
+    }
+  };
+  // Await every launched check; input indices keep attribution deterministic.
+  await Promise.all(Array.from({ length: Math.min(maxConcurrent, checks.length) }, worker));
+  parent.throwIfAborted();
+  return failures.filter((failure): failure is VerificationFailure => failure !== undefined);
 }
 
 function verificationFeedback(round: number, maxAttempts: number, failures: VerificationFailure[]): string {
   const records = failures.map(failure => ({
+    index: failure.index,
     check: failure.check,
     status: failure.status,
     stdoutPath: failure.stdoutPath,
