@@ -2,6 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { runProcess } from './process.ts';
+import { protectedSnapshotChange, restoreProtected, snapshotProtected } from './protected.ts';
 import { loadState, saveState, statePath, withJobLock } from './store.ts';
 import type { BenchmarkJobConfig, BenchmarkJobState, IterationRecord, Verification } from './types.ts';
 
@@ -56,10 +57,11 @@ async function changedPaths(workspace: string): Promise<string[]> {
   return paths;
 }
 
-async function protectedChange(config: BenchmarkJobConfig): Promise<string | undefined> {
-  return (await changedPaths(config.workspace)).find(changed =>
+async function protectedChange(config: BenchmarkJobConfig, jobDir: string): Promise<string | undefined> {
+  const gitChange = (await changedPaths(config.workspace)).find(changed =>
     config.protectedPaths.some(path => changed === path || changed.startsWith(path + '/'))
   );
+  return gitChange ?? await protectedSnapshotChange(config.workspace, jobDir, config.protectedPaths);
 }
 
 async function verify(config: BenchmarkJobConfig, jobDir: string, label: string, deadline: number) {
@@ -74,9 +76,11 @@ async function verify(config: BenchmarkJobConfig, jobDir: string, label: string,
   } catch (error) { return { process, error: 'Invalid verifier output: ' + String(error) }; }
 }
 
-async function restore(workspace: string, commit: string) {
+async function restore(config: BenchmarkJobConfig, jobDir: string, commit: string) {
+  const workspace = config.workspace;
   await git(workspace, ['reset', '--hard', commit]);
   await git(workspace, ['clean', '-fd']);
+  await restoreProtected(workspace, jobDir, config.protectedPaths);
 }
 
 export function promptFor(state: BenchmarkJobState, iteration: number): string {
@@ -101,9 +105,11 @@ async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: 
     if (!await git(config.workspace, ['ls-files', '--', path])) throw new Error('Protected path is not tracked: ' + path);
   }
   await validateVerifier(config, suppliedWorkspace);
+  await snapshotProtected(config.workspace, jobDir, config.protectedPaths);
   const baseline = await verify(config, jobDir, 'baseline', deadline);
   if (!baseline.value || baseline.error) throw new Error(baseline.error ?? 'Baseline verification failed.');
   if (!baseline.value.valid) throw new Error('Baseline is invalid: ' + (baseline.value.summary ?? 'no summary'));
+  if (await protectedChange(config, jobDir)) throw new Error('Baseline verifier modified protected benchmark paths.');
   const targetScore = baseline.value.score + Math.abs(baseline.value.score) * config.targetImprovement;
   if (!Number.isFinite(targetScore)) throw new Error('Benchmark target is not finite.');
   const now = new Date().toISOString();
@@ -121,6 +127,11 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
   validateConfig(config);
   const suppliedWorkspace = resolve(config.workspace);
   config = { ...config, workspace: await realpath(suppliedWorkspace) };
+  const resolvedJobDir = await realpath(jobDir);
+  const jobRelative = relative(config.workspace, resolvedJobDir);
+  if (!jobRelative || (!jobRelative.startsWith('..') && !isAbsolute(jobRelative))) {
+    throw new Error('Long-horizon job directory must be outside the editable workspace.');
+  }
   const deadline = Date.parse(config.deadlineAt);
   let state: BenchmarkJobState;
   try { state = await loadState(jobDir); }
@@ -129,7 +140,7 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
     state = await initialize(config, jobDir, deadline, suppliedWorkspace);
   }
   if (state.status !== 'running') return state;
-  await restore(config.workspace, state.bestCommit);
+  await restore(config, jobDir, state.bestCommit);
   await validateVerifier(config, suppliedWorkspace);
   if (state.activeIteration) {
     const active = state.activeIteration;
@@ -149,13 +160,13 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
     const head = await git(config.workspace, ['rev-parse', 'HEAD']);
     if (agent.timedOut || agent.exitCode !== 0 || head !== state.bestCommit) {
       record.reason = head !== state.bestCommit ? 'Agent changed Git history.' : agent.timedOut ? 'Agent timed out.' : 'Agent exited with code ' + agent.exitCode + '.';
-      await restore(config.workspace, state.bestCommit);
+      await restore(config, jobDir, state.bestCommit);
     } else {
-      const violation = await protectedChange(config);
+      const violation = await protectedChange(config, jobDir);
       if (violation) {
         record.reason = 'Agent modified protected benchmark path: ' + violation;
         record.outcome = 'rejected';
-        await restore(config.workspace, state.bestCommit);
+        await restore(config, jobDir, state.bestCommit);
         record.finishedAt = new Date().toISOString();
         state.iterations.push(record);
         state.activeIteration = undefined;
@@ -165,24 +176,24 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
       state.activeIteration.phase = 'verifying';
       await saveState(jobDir, state);
       const checked = await verify(config, jobDir, 'iteration-' + number, deadline);
-      const verifierViolation = await protectedChange(config);
+      const verifierViolation = await protectedChange(config, jobDir);
       record.verifierStdoutPath = checked.process.stdoutPath;
       record.verifierStderrPath = checked.process.stderrPath;
       if (verifierViolation) {
         record.reason = 'Verifier modified protected benchmark path: ' + verifierViolation;
         record.outcome = 'rejected';
-        await restore(config.workspace, state.bestCommit);
+        await restore(config, jobDir, state.bestCommit);
       } else if (checked.error || !checked.value?.valid) {
         record.reason = checked.error ?? ('Correctness verification failed: ' + (checked.value?.summary ?? 'no summary'));
         record.outcome = 'rejected';
-        await restore(config.workspace, state.bestCommit);
+        await restore(config, jobDir, state.bestCommit);
       } else if (checked.value.score <= state.bestScore) {
         record.score = checked.value.score; record.reason = 'No strict improvement.'; record.outcome = 'rejected';
-        await restore(config.workspace, state.bestCommit);
+        await restore(config, jobDir, state.bestCommit);
       } else {
         record.score = checked.value.score; record.reason = 'Verified strict improvement.'; record.outcome = 'accepted';
         await git(config.workspace, ['add', '-A']);
-        const stagedViolation = await protectedChange(config);
+        const stagedViolation = await protectedChange(config, jobDir);
         if (stagedViolation) throw new Error('Protected benchmark path staged during acceptance: ' + stagedViolation);
         const changed = await git(config.workspace, ['status', '--porcelain']);
         if (!changed) {
@@ -203,7 +214,7 @@ async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<Be
   }
   state.status = 'exhausted';
   state.stopReason = Date.now() >= deadline ? 'Deadline reached.' : 'Iteration budget reached.';
-  await restore(config.workspace, state.bestCommit);
+  await restore(config, jobDir, state.bestCommit);
   await saveState(jobDir, state);
   return state;
 }

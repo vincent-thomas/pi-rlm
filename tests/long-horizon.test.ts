@@ -126,6 +126,36 @@ test.each([
   expect((await readFile(join(workspace, 'score.txt'), 'utf8')).trim()).toBe('100');
 });
 
+test('rejects ignored benchmark injection and removes only the injected file', async () => {
+  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt\nmkdir -p bench/cache\necho fake > bench/cache/injected.dat');
+  await writeFile(join(workspace, '.gitignore'), 'bench/cache/\nexternal-cache/\n');
+  await command(workspace, 'git', ['add', '.gitignore']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'ignore']);
+  await mkdir(join(workspace, 'external-cache'));
+  await writeFile(join(workspace, 'external-cache', 'user.dat'), 'outside\n');
+  const state = await runBenchmarkJob(config, jobDir);
+  expect(state.iterations[0]?.outcome).toBe('rejected');
+  expect(state.iterations[0]?.reason).toContain('bench/cache');
+  expect((await readFile(join(workspace, 'score.txt'), 'utf8')).trim()).toBe('100');
+  await expect(readFile(join(workspace, 'bench/cache/injected.dat'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readFile(join(workspace, 'external-cache/user.dat'), 'utf8')).toBe('outside\n');
+});
+
+test('restores a preexisting ignored benchmark file after rejected tampering', async () => {
+  const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt\necho forged > bench/cache/user.dat\necho injected > bench/cache/new.dat');
+  await writeFile(join(workspace, '.gitignore'), 'bench/cache/\n');
+  await command(workspace, 'git', ['add', '.gitignore']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'ignore']);
+  await mkdir(join(workspace, 'bench/cache'));
+  await writeFile(join(workspace, 'bench/cache/user.dat'), 'personal baseline\n');
+  const state = await runBenchmarkJob(config, jobDir);
+  expect(state.iterations[0]?.outcome).toBe('rejected');
+  expect(state.iterations[0]?.reason).toContain('bench/cache/');
+  expect(await readFile(join(workspace, 'bench/cache/user.dat'), 'utf8')).toBe('personal baseline\n');
+  await expect(readFile(join(workspace, 'bench/cache/new.dat'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await readFile(join(workspace, 'score.txt'), 'utf8')).trim()).toBe('100');
+});
+
 test('rejects an unprotected workspace verifier entrypoint', async () => {
   const { workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
   const verifier = join(workspace, 'verify.sh');
