@@ -28,13 +28,16 @@ function validateConfig(config: BenchmarkJobConfig): void {
 
 // The verifier is trusted code, not an arbitrary command assembled from model input.
 // Generic argument parsing cannot safely classify modules, preloads or interpreters.
-async function validateVerifier(config: BenchmarkJobConfig): Promise<void> {
+async function validateVerifier(config: BenchmarkJobConfig, suppliedWorkspace: string): Promise<void> {
   if (!isAbsolute(config.verifier.command) || config.verifier.args?.length) {
     throw new Error('Verifier must be a canonical absolute external executable with no arguments.');
   }
+  const supplied = relative(config.workspace, resolve(config.verifier.command));
   const executable = await realpath(config.verifier.command);
   const local = relative(config.workspace, executable);
-  if (!local || (!local.startsWith('..') && !isAbsolute(local))) {
+  const inside = (path: string) => !path || (!path.startsWith('..') && !isAbsolute(path));
+  const suppliedViaAlias = relative(suppliedWorkspace, resolve(config.verifier.command));
+  if (inside(supplied) || inside(suppliedViaAlias) || inside(local)) {
     throw new Error('Verifier executable must be outside the editable workspace.');
   }
 }
@@ -90,14 +93,14 @@ export function promptFor(state: BenchmarkJobState, iteration: number): string {
   ].join('\n');
 }
 
-async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: number): Promise<BenchmarkJobState> {
+async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: number, suppliedWorkspace: string): Promise<BenchmarkJobState> {
   const clean = await git(config.workspace, ['status', '--porcelain']);
   if (clean) throw new Error('Benchmark workspace must start clean.');
   const baselineCommit = await git(config.workspace, ['rev-parse', 'HEAD']);
   for (const path of config.protectedPaths) {
     if (!await git(config.workspace, ['ls-files', '--', path])) throw new Error('Protected path is not tracked: ' + path);
   }
-  await validateVerifier(config);
+  await validateVerifier(config, suppliedWorkspace);
   const baseline = await verify(config, jobDir, 'baseline', deadline);
   if (!baseline.value || baseline.error) throw new Error(baseline.error ?? 'Baseline verification failed.');
   if (!baseline.value.valid) throw new Error('Baseline is invalid: ' + (baseline.value.summary ?? 'no summary'));
@@ -116,17 +119,18 @@ async function initialize(config: BenchmarkJobConfig, jobDir: string, deadline: 
 
 async function runLocked(config: BenchmarkJobConfig, jobDir: string): Promise<BenchmarkJobState> {
   validateConfig(config);
-  config = { ...config, workspace: await realpath(resolve(config.workspace)) };
+  const suppliedWorkspace = resolve(config.workspace);
+  config = { ...config, workspace: await realpath(suppliedWorkspace) };
   const deadline = Date.parse(config.deadlineAt);
   let state: BenchmarkJobState;
   try { state = await loadState(jobDir); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    state = await initialize(config, jobDir, deadline);
+    state = await initialize(config, jobDir, deadline, suppliedWorkspace);
   }
   if (state.status !== 'running') return state;
   await restore(config.workspace, state.bestCommit);
-  await validateVerifier(config);
+  await validateVerifier(config, suppliedWorkspace);
   if (state.activeIteration) {
     const active = state.activeIteration;
     state.iterations.push({ number: active.number, startedAt: active.startedAt, finishedAt: new Date().toISOString(), outcome: 'error', reason: 'Interrupted invocation recovered.' });

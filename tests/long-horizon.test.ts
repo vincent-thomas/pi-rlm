@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -146,6 +146,16 @@ test('rejects even protected workspace verifier entrypoints', async () => {
   await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'verifier']);
   config.protectedPaths.push('verify.sh');
   config.verifier.command = verifier;
+  await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('outside the editable workspace');
+});
+
+test('rejects workspace symlink to external verifier even when target is trusted', async () => {
+  const { root, workspace, jobDir, config } = await guardrailFixture('echo 120 > score.txt');
+  const link = join(workspace, 'verify-link');
+  await symlink(join(root, 'verify.sh'), link);
+  await command(workspace, 'git', ['add', 'verify-link']);
+  await command(workspace, 'git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'symlink']);
+  config.verifier.command = link;
   await expect(runBenchmarkJob(config, jobDir)).rejects.toThrow('outside the editable workspace');
 });
 
