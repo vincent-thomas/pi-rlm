@@ -56,6 +56,21 @@ print(state.decision);
 
 Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
+### Opt-in Git preflight and claim consistency
+
+In a delegated worker's `exec` cell, request compact local Git metadata before coordinating work:
+
+```js
+const p = await gitPreflight();
+print({ branch: p.branch, head: p.head, dirtyCount: p.dirtyCount, dirtyPaths: p.dirtyPaths,
+  omittedDirtyPaths: p.omittedDirtyPaths, worktrees: p.worktrees });
+const check = await validateClaims({ branch: p.branch, head: p.head,
+  pr: { number: 15, url: 'https://github.com/owner/repo/pull/15', headBranch: p.branch } });
+print(check);
+```
+
+These helpers run in pi's working directory and **do not** stash, reset, create worktrees, push or contact GitHub. Preflight includes tracked/untracked (not ignored) paths and caps displayed dirty paths at 20 and worktrees at 10, returning counts for omitted entries. It may reveal file names and can fail on enormous or unavailable Git repositories. `validateClaims` compares a full commit SHA and branch to local Git and checks a PR number against the number in a canonical GitHub PR URL; it cannot verify the remote PR's identity, state, code quality or test outcomes. A passing schema/consistency check is **not evidence that the claims are true**. For remote PR state, run a separate deterministic `gh pr view` check.
+
 ### Model tiers
 
 On session start, the extension selects the `smart` tier for the top-level orchestrator. `llm_query` also defaults to `smart` when its model option is omitted. Child model defaults are defined in `MODEL_TIERS`: `routine` uses `gpt-6-luna` with `low` reasoning, `smart` uses `gpt-6-sol` with `medium` reasoning, and `agi` uses `gpt-6-astra` with `high` reasoning. Override either lower tier with an exact model reference (optionally suffixed with a reasoning level, such as `:high`; without a suffix, the provider's reasoning default applies):

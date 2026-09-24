@@ -6,6 +6,7 @@ import { Worker } from 'node:worker_threads';
 import { bash } from './bash.ts';
 import type { QueryOptions } from './rlm.ts';
 import { Scratchpad } from './scratchpad.ts';
+import { gitPreflight, validateClaims } from './git-preflight.ts';
 
 export type Query = (prompt: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
 export interface ExecResult { text: string; isError: boolean }
@@ -83,8 +84,8 @@ export class Runtime {
       const onExit = (code: number) => finish({ text: `Worker exited (${code}); workspace reset.`, isError: true }, true);
       const onMessage = async (message: any) => {
         if (message.type === 'result') finish({ text: message.text || '(no output)', isError: message.isError }, message.reset);
-        if (message.type === 'query' || message.type === 'bash' || message.type === 'scratchpadRead' || message.type === 'scratchpadEdit') {
-          const type = message.type === 'bash' ? 'bashResult' : message.type === 'query' ? 'queryResult' : 'scratchpadResult';
+        if (message.type === 'query' || message.type === 'bash' || message.type === 'scratchpadRead' || message.type === 'scratchpadEdit' || message.type === 'gitPreflight' || message.type === 'validateClaims') {
+          const type = message.type === 'bash' ? 'bashResult' : message.type === 'query' ? 'queryResult' : message.type === 'gitPreflight' || message.type === 'validateClaims' ? 'gitResult' : 'scratchpadResult';
           try {
             const result = message.type === 'bash'
               ? await bash(message.command, this.cwd, controller.signal)
@@ -92,7 +93,11 @@ export class Runtime {
                 ? await query(message.prompt, controller.signal, message.options)
                 : message.type === 'scratchpadRead'
                   ? await this.scratchpad.read(message.offset, message.len)
-                  : await this.scratchpad.edit(message.oldText, message.newText);
+                  : message.type === 'scratchpadEdit'
+                    ? await this.scratchpad.edit(message.oldText, message.newText)
+                    : message.type === 'gitPreflight'
+                      ? await gitPreflight(this.cwd, controller.signal)
+                      : await validateClaims(this.cwd, controller.signal, message.claims);
             if (!done && message.type === 'query') await this.saveResult(message.prompt, message.options?.model ?? 'smart', result as string);
             if (!done) worker.postMessage({ type, id: message.id, result, resultsPath: this.resultsPath });
           } catch (error) {
