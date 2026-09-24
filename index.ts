@@ -10,7 +10,6 @@ import { ActivityPublisher, ActivityUpdateSink, type ActivitySnapshot } from './
 import { formatActivity } from './src/render-activity.ts';
 import { autonomyInstructions, createQuery, instructions, MODEL_TIERS, orchestrationInstructions, parameters, type ModelTier } from './src/rlm.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import { longHorizonInstructions, registerLongHorizon } from './src/long-horizon/extension.ts';
 
 export interface RlmToolDetails { activity?: ActivitySnapshot }
 export { formatActivity };
@@ -69,7 +68,6 @@ function resolveModelTier(ctx: ExtensionContext, tier: ModelTier) {
 }
 
 export default function rlm(pi: ExtensionAPI) {
-  registerLongHorizon(pi);
   let runtime: Runtime | undefined;
   let scratchpad = new Scratchpad();
   let contextLength = 0;
@@ -142,7 +140,7 @@ export default function rlm(pi: ExtensionAPI) {
     scratchpad = new Scratchpad(); // Invalidate callbacks from the previous session, even if restore fails.
     const restored = restoreSessionScratchpad(pi, ctx.sessionManager, () => scratchpad === restored);
     scratchpad = restored;
-    pi.setActiveTools(process.env.PI_RLM_ITERATION_WORKER === '1' ? ['exec'] : ['exec', 'start_long_horizon']);
+    pi.setActiveTools(['exec']);
     const { model, reasoning } = resolveModelTier(ctx, 'smart');
     if (!await pi.setModel(model)) throw new Error('Unable to select the smart-tier top-level model: ' + model.provider + '/' + model.id);
     if (reasoning !== undefined) pi.setThinkingLevel(reasoning);
@@ -150,7 +148,7 @@ export default function rlm(pi: ExtensionAPI) {
   pi.on('session_tree', reset);
   pi.on('session_shutdown', () => { reset(); scratchpad = new Scratchpad(); });
   pi.on('before_agent_start', event => ({
-    systemPrompt: event.systemPrompt + '\n\nYou are the top-level orchestrator, defaulting to the smart tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + '\n' + longHorizonInstructions + `\nLoaded context: ${contextLength} characters.`,
+    systemPrompt: event.systemPrompt + '\n\nYou are the top-level orchestrator, defaulting to the smart tier.\n' + orchestrationInstructions + '\n' + autonomyInstructions + '\n' + instructions + `\nLoaded context: ${contextLength} characters.`,
   }));
   pi.registerCommand('rlm-load', {
     description: 'Load a UTF-8 file into the JavaScript context without adding it to the model prompt',
