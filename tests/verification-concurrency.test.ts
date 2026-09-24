@@ -69,3 +69,38 @@ test('duplicate failed commands remain attributable by index', async () => {
     });
   expect(result.map(x => x.index)).toEqual([0, 1]);
 });
+
+test('cancellation waits for late-settling active checks without starting pending checks', async () => {
+  jest.useFakeTimers();
+  try {
+    const controller = new AbortController();
+    const started: string[] = [];
+    const settled: string[] = [];
+    let completed = false;
+    const result = runVerificationRound('.', ['first', 'second', 'pending'], 1000, controller.signal, 2,
+      async (check, _cwd, signal) => {
+        started.push(check);
+        // Deliberately delay cleanup after cancellation rather than rejecting on abort.
+        await new Promise<void>(resolve => setTimeout(resolve, check === 'first' ? 100 : 200));
+        expect(signal.aborted).toBe(true);
+        settled.push(check);
+        return { exitCode: 0, stdoutPath: check + '.out', stderrPath: check + '.err' };
+      });
+    const observed = result.then(() => { completed = true; }, () => { completed = true; });
+    expect(started).toEqual(['first', 'second']);
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    jest.advanceTimersByTime(100);
+    await Promise.resolve(); await Promise.resolve();
+    expect(settled).toEqual(['first']);
+    expect(completed).toBe(false);
+    expect(started).toEqual(['first', 'second']);
+    jest.advanceTimersByTime(100);
+    await expect(result).rejects.toThrow('cancelled');
+    await observed;
+    expect(settled).toEqual(['first', 'second']);
+    expect(started).toEqual(['first', 'second']);
+    expect(completed).toBe(true);
+  } finally { jest.useRealTimers(); }
+});
