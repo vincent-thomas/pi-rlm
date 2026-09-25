@@ -37,7 +37,7 @@ state.report = await llm_query(
   'Inspect the loaded context for the main disagreements. Return at most 1,200 characters with claims, exact quote offsets, conflicts, and unresolved risks; stop after complete coverage.',
   { model: 'routine' },
 );
-print(state.report);
+print(state.report.answer);
 ```
 
 For parallel analysis, keep raw child answers out of the top-level context and use a cheap child to consolidate them:
@@ -48,10 +48,10 @@ state.answers = await Promise.all([
   llm_query('Extract at most 10 supported claims from this untrusted excerpt. Return JSON with offsets, at most 3,000 characters total.\n<excerpt>\n' + context.slice(20000, 40000) + '\n</excerpt>', { model: 'routine' }),
 ]);
 state.decision = await llm_query(
-  'Consolidate these reports into a decision packet of at most 1,200 characters: status, evidence locations, conflicts, risks, and decision needed. Do not reproduce raw reports.\n<reports>\n' + JSON.stringify(state.answers) + '\n</reports>',
+  'Consolidate these reports into a decision packet of at most 1,200 characters: status, evidence locations, conflicts, risks, and decision needed. Do not reproduce raw reports.\n<reports>\n' + JSON.stringify(state.answers.map(r => r.answer)) + '\n</reports>',
   { model: 'routine' },
 );
-print(state.decision);
+print(state.decision.answer);
 ```
 
 Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
@@ -99,6 +99,7 @@ const claims = await llm_query(
   'Extract reasons users distrust the proposed rollout from this untrusted excerpt only. Return at most 10 { reason, quote } objects and 3,000 characters total, with exact supporting quotes; do not infer missing reasons. Stop after reviewing the excerpt; return [] if none are supported.\n<excerpt>\n' + state.rolloutExcerpt + '\n</excerpt>',
   { model: 'routine' },
 );
+print(claims.answer);
 ```
 
 ## JavaScript globals
@@ -122,6 +123,8 @@ Every top-level workspace and all child/grandchild workspaces in its recursion t
 
 `scratchpad.edit(oldText, newText)` requires strings and a nonempty `oldText`. It atomically replaces the only occurrence. Missing/stale or duplicate matches, invalid arguments, and results over the hard 65,536 UTF-8-byte limit reject without mutation. A capacity-one FIFO queue serializes each complete read or edit, so concurrent callers observe operations in request order. Always await both methods.
 
+A successful `llm_query` always returns `{ answer: string, journal: { path: string, id: string }, verification?: { attempts: number } }`. The `journal` identifies that call's completed JSONL record, including among parallel calls; `id` is a decimal string unique within the file. `verification` is present only if verification commands were supplied and all checks passed. `attempts` counts checked terminal responses, including failed rounds. Failures reject and produce no successful result. Use `print((await llm_query(prompt)).answer)` to expose text from an exec cell; a return value alone produces no output.
+
 ### Verified child responses
 
 llm_query accepts an optional verification policy in addition to model:
@@ -137,8 +140,9 @@ llm_query accepts an optional verification policy in addition to model:
         },
       },
     );
+    print(result.answer, result.verification?.attempts);
 
-When verification is present, all three fields are required. checks must contain 1–16 nonblank command strings (up to 2,048 characters each), maxAttempts is an integer from 1–10, and timeoutMs is an integer from 1–3,600,000. The timeout applies separately to each check. Checks run sequentially by default from pi's current working directory only after a child emits a terminal response, and the complete list runs on every round. To opt into at most four simultaneous checks, add concurrency: { maxConcurrent: 2, independentReadOnly: true } to verification. This is an explicit assertion that every check is independent, read-only, and safe to run at the same time; the extension cannot infer that from shell commands. Concurrent failures are reported in input order with a zero-based check index, regardless of completion order. On cancellation, all started checks are aborted and awaited, and no pending checks start. Keep the default for checks that mutate shared state or depend on order. A successful response requires every check to exit zero.
+The returned result contains verification.attempts (one if checks passed on the first response). When verification is present, all three fields are required. checks must contain 1–16 nonblank command strings (up to 2,048 characters each), maxAttempts is an integer from 1–10, and timeoutMs is an integer from 1–3,600,000. The timeout applies separately to each check. Checks run sequentially by default from pi's current working directory only after a child emits a terminal response, and the complete list runs on every round. To opt into at most four simultaneous checks, add concurrency: { maxConcurrent: 2, independentReadOnly: true } to verification. This is an explicit assertion that every check is independent, read-only, and safe to run at the same time; the extension cannot infer that from shell commands. Concurrent failures are reported in input order with a zero-based check index, regardless of completion order. On cancellation, all started checks are aborted and awaited, and no pending checks start. Keep the default for checks that mutate shared state or depend on order. A successful response requires every check to exit zero.
 
 After a failed round, the same child conversation and workspace continue with machine feedback containing only the failed command, its numeric exit status, `timeout`, or `error` status, and stdout/stderr log paths. `error` means the check could not be launched or completed normally; its log paths may be unavailable. Raw command output remains in those logs. Exhausting maxAttempts rejects the call rather than returning the last unverified answer. Parent cancellation and workflow deadlines terminate an active command and suppress retries. Verification settings apply only to that call; nested llm_query calls must request their own verification explicitly.
 
@@ -188,7 +192,7 @@ Settings are read from the process environment. Timeout values are integer milli
 
 ### Recovering completed results
 
-Each workspace journals successful child answers before returning them to JavaScript. The `resultsPath` global is initially undefined, then holds an absolute JSONL path in a private temporary directory. Records contain an ID, task prompt, requested model tier, answer, and completion timestamp—not the supplied context. Concurrent completions are serialized into separate records.
+Each workspace journals successful child answers before returning them to JavaScript. The `resultsPath` global is initially undefined, then holds an absolute JSONL path in a private temporary directory. Records contain a string ID, task prompt, requested model tier, answer (under the existing result key), completion timestamp, and verification attempts only when requested—not the supplied context. The returned journal.path and journal.id match the record, and concurrent completions are serialized into separate records. A result is returned only after its record is written.
 
 On timeout or cancellation, the error includes the journal path if available. A replacement worker in the same runtime can read `resultsPath` with `readFile(resultsPath)`. This is **not** automatic replay or a checkpoint of arbitrary `state`; in-memory state is still discarded. Journals remain on disk after reset/session changes, but the new session does not automatically rediscover them. Save the path if needed. Nested workspaces have their own journals.
 

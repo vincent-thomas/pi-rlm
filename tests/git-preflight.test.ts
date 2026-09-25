@@ -78,12 +78,12 @@ test('claim checks reject adversarial PR URLs rather than trusting ambiguous tex
 test('exec exposes opt-in helpers and handles invalid claims without resetting workspace', async () => repo(async cwd => {
   const runtime = new Runtime(cwd);
   try {
-    const result = await runtime.exec('const p = await gitPreflight(); print(p.branch, p.dirtyCount); print((await validateClaims({branch: "task-branch"})).ok)', async () => 'unused');
+    const result = await runtime.exec('const p = await gitPreflight(); print(p.branch, p.dirtyCount); print((await validateClaims({branch: "task-branch"})).ok)', async () => ({ answer: 'unused' }));
     expect(result).toEqual({ text: 'task-branch 0\ntrue\n', isError: false });
-    const error = await runtime.exec('await validateClaims({pr: {number: 0}})', async () => 'unused');
+    const error = await runtime.exec('await validateClaims({pr: {number: 0}})', async () => ({ answer: 'unused' }));
     expect(error.isError).toBe(true);
     expect(error.text).toContain('validateClaims requires');
-    expect((await runtime.exec('print(1)', async () => 'unused')).isError).toBe(false);
+    expect((await runtime.exec('print(1)', async () => ({ answer: 'unused' }))).isError).toBe(false);
   } finally { runtime.dispose(); }
 }));
 

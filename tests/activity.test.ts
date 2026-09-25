@@ -12,7 +12,7 @@ function setup(retention = 100) { let time = 0, n = 0; const history: any[] = []
 test('lifecycle counts turns and tools and publishes one sanitized terminal snapshot', async () => {
   const { value, history } = setup(); let n = 0;
   const query = createQuery(process.cwd(), async () => ++n === 1 ? response([{ type: 'toolCall', id: 't', name: 'exec', arguments: { code: 'print(1)' } }]) : response([{ type: 'text', text: 'done' }]), { remaining: 1 }, 0, 3, { reporter: value });
-  expect(await query('PROMPT_SENTINEL', new AbortController().signal)).toBe('done');
+  expect(await query('PROMPT_SENTINEL', new AbortController().signal)).toEqual({ answer: 'done' });
   expect(value.snapshot().calls[0]).toMatchObject({ depth: 1, turn: 2, toolCallCount: 1, phase: 'model', status: 'succeeded' });
   expect(value.snapshot().totals).toMatchObject({ calls: 1, active: 0, succeeded: 1, modelTurns: 2, toolCalls: 1 });
   expect(history.flatMap(s => s.calls).filter((c: any) => c.status !== 'active')).toHaveLength(1);
@@ -22,7 +22,7 @@ test('lifecycle counts turns and tools and publishes one sanitized terminal snap
 test('verification is represented as live activity', async () => {
   const { value, history } = setup();
   const query = createQuery(process.cwd(), async () => response([{ type: 'text', text: 'done' }]), { remaining: 1 }, 0, 2, { reporter: value });
-  expect(await query('work', new AbortController().signal, { verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 } })).toBe('done');
+  expect(await query('work', new AbortController().signal, { verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 } })).toEqual({ answer: 'done', verification: { attempts: 1 } });
   expect(history.flatMap(snapshot => snapshot.calls).some(call => call.phase === 'verification' && call.verificationRound === 1)).toBe(true);
   expect(value.snapshot().calls[0]).toMatchObject({ status: 'succeeded', verificationRound: 1 });
 });
@@ -32,7 +32,7 @@ test('recursion inherits reporter and parent relationship', async () => {
   const query = createQuery(process.cwd(), async ctx => {
     if (ctx.messages.at(-1)?.content === 'nested') return response([{ type: 'text', text: 'child' }]);
     if (ctx.messages.length > 1) return response([{ type: 'text', text: 'parent' }]);
-    return response([{ type: 'toolCall', id: 't', name: 'exec', arguments: { code: 'print(await llm_query("nested"))' } }]);
+    return response([{ type: 'toolCall', id: 't', name: 'exec', arguments: { code: 'print((await llm_query("nested")).answer)' } }]);
   }, { remaining: 2 }, 0, 3, { reporter: value });
   await query('root', new AbortController().signal, { verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 } });
   const [parent, child] = value.snapshot().calls;
@@ -109,7 +109,7 @@ test('phase timings accumulate across success and verification', async () => {
     { reporter: value }, undefined, undefined, '', () => times.shift()!);
   expect(await query('secret prompt', new AbortController().signal, {
     verification: { checks: ['true'], maxAttempts: 1, timeoutMs: 1000 },
-  })).toBe('done');
+  })).toEqual({ answer: 'done', verification: { attempts: 1 } });
   expect(times).toHaveLength(0);
   expect(value.snapshot().calls[0]).toMatchObject({ modelMs: 19, execMs: 18, verificationMs: 17, status: 'succeeded' });
   expect(value.snapshot().totals).toMatchObject({ modelMs: 19, execMs: 18, verificationMs: 17 });

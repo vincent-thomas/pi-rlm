@@ -43,9 +43,9 @@ test('timed-out workers terminate before replacement execution begins', async ()
   expect((await timedOut).text).toContain('timed out');
 
   let oldWorkerStopped = false;
-  const replacement = await repl.exec('print(await llm_query("check")); print(typeof state.x)', async () => {
+  const replacement = await repl.exec('print((await llm_query("check")).answer); print(typeof state.x)', async () => {
     oldWorkerStopped = oldWorkerExited;
-    return 'ready';
+    return { answer: 'ready' };
   });
   expect(oldWorkerStopped).toBe(true);
   expect(replacement.text).toBe('ready\nundefined\n');
@@ -57,22 +57,22 @@ test('cancellation propagates to in-flight child requests', async () => {
   const result = repl.exec('return await llm_query("question")', async (_p, signal) => {
     controller.abort();
     childAborted = signal.aborted;
-    return 'unused';
+    return { answer: 'unused' };
   }, controller.signal);
   expect((await result).isError).toBe(true);
   expect(childAborted).toBe(true);
 });
 test('parallel child results are correlated correctly', async () => {
-  const result = await runtime().exec('state.answers = await Promise.all([llm_query("a: one"), llm_query("b: two")]); print(state.answers.join(","))', async p => p);
+  const result = await runtime().exec('state.answers = await Promise.all([llm_query("a: one"), llm_query("b: two")]); print(state.answers.map(r => r.answer).join(","))', async p => ({ answer: p }));
   expect(result.text).toBe('a: one,b: two\n');
 });
 test('child model tiers default to smart and explicit tiers are forwarded', async () => {
   const seen: string[] = [];
   const result = await runtime().exec(
-    `print(await llm_query("localize: one")); print(await llm_query("synthesize: two", { model: "agi" }))`,
+    `print((await llm_query("localize: one")).answer); print((await llm_query("synthesize: two", { model: "agi" })).answer)`,
     async (_prompt, _signal, options) => {
       seen.push(options?.model ?? 'missing');
-      return options?.model ?? 'missing';
+      return { answer: options?.model ?? 'missing' };
     },
   );
   expect(result.text).toBe('smart\nagi\n');
@@ -99,7 +99,7 @@ test('verification retries the same conversation, runs every check sequentially,
     const result = await query('work', new AbortController().signal, { verification: {
       checks: ["printf '\\101\\103\\124\\125\\101\\114' >&2; test -f repaired", "printf x >> order"], maxAttempts: 2, timeoutMs: 1000,
     } });
-    expect(result).toBe('verified');
+    expect(result).toEqual({ answer: 'verified', verification: { attempts: 2 } });
     expect(completions).toBe(2);
     expect(await readFile(join(cwd, 'order'), 'utf8')).toBe('xx');
   } finally { await rm(cwd, { recursive: true, force: true }); }
@@ -121,7 +121,7 @@ test('verification repair gets a fresh model-turn allowance and full bounded che
     }, { remaining: 1 }, 0, 3);
     expect(await query('work', new AbortController().signal, { verification: {
       checks: [longCheck], maxAttempts: 2, timeoutMs: 1000,
-    } })).toBe('verified');
+    } })).toEqual({ answer: 'verified', verification: { attempts: 2 } });
     expect(calls).toBe(4);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
@@ -155,15 +155,25 @@ test('verification timeout and parent cancellation stop checks without retrying'
   expect(cancelCalls).toBe(1);
 });
 
+test('worker exposes correlated journal metadata and omits verification without checks', async () => {
+  const repl = runtime();
+  const result = await repl.exec('print(JSON.stringify(await llm_query("plain")))', async () => ({ answer: '' }));
+  expect(result.isError).toBe(false);
+  expect(JSON.parse(result.text.trim())).toEqual({ answer: '', journal: { path: repl.resultsPath, id: '1' } });
+  const verified = await repl.exec('print(JSON.stringify(await llm_query("verified", { verification: { checks: ["true"], maxAttempts: 2, timeoutMs: 1000 } })))',
+    async () => ({ answer: 'ok', verification: { attempts: 1 } }));
+  expect(JSON.parse(verified.text.trim())).toEqual({ answer: 'ok', journal: { path: repl.resultsPath, id: '2' }, verification: { attempts: 1 } });
+});
+
 test('verification options are validated and forwarded only when explicitly requested', async () => {
   const seen: any[] = [];
   const repl = runtime();
-  const good = await repl.exec('print(await llm_query("x", { model: "smart", verification: { checks: ["true"], maxAttempts: 2, timeoutMs: 50 } }))',
-    async (_prompt, _signal, options) => { seen.push(options); return 'ok'; });
+  const good = await repl.exec('print((await llm_query("x", { model: "smart", verification: { checks: ["true"], maxAttempts: 2, timeoutMs: 50 } })).answer)',
+    async (_prompt, _signal, options) => { seen.push(options); return { answer: 'ok' }; });
   expect(good.text).toBe('ok\n');
   expect(seen[0]).toEqual({ model: 'smart', inherit: 'full', verification: { checks: ['true'], maxAttempts: 2, timeoutMs: 50 } });
-  const concurrent = await repl.exec('print(await llm_query("x", { verification: { checks: ["true", "true"], maxAttempts: 1, timeoutMs: 50, concurrency: { maxConcurrent: 2, independentReadOnly: true } } }))',
-    async (_prompt, _signal, options) => { seen.push(options); return 'ok'; });
+  const concurrent = await repl.exec('print((await llm_query("x", { verification: { checks: ["true", "true"], maxAttempts: 1, timeoutMs: 50, concurrency: { maxConcurrent: 2, independentReadOnly: true } } })).answer)',
+    async (_prompt, _signal, options) => { seen.push(options); return { answer: 'ok' }; });
   expect(concurrent.text).toBe('ok\n');
   expect(seen[1]?.verification?.concurrency).toEqual({ maxConcurrent: 2, independentReadOnly: true });
   for (const verification of [null, {}, { checks: [], maxAttempts: 1, timeoutMs: 1 }, { checks: [' '], maxAttempts: 1, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 0, timeoutMs: 1 }, { checks: ['true'], maxAttempts: 1, timeoutMs: 1.5 },
@@ -185,7 +195,7 @@ test('createQuery passes the requested tier to model completion', async () => {
     seen = tier;
     return response([{ type: 'text', text: 'done' }]);
   });
-  expect(await query('verify', new AbortController().signal, { model: 'smart' })).toBe('done');
+  expect(await query('verify', new AbortController().signal, { model: 'smart' })).toEqual({ answer: 'done' });
   expect(seen).toBe('smart');
 });
 
@@ -201,7 +211,7 @@ test('full inheritance forks messages and loaded context while none isolates bot
     return response([{ type: 'text', text: 'summary' }]);
   }, undefined, 0, undefined, undefined, undefined,
   { systemPrompt: 'top', messages: [{ role: 'user', content: 'prior request', timestamp: 1 }] }, 'SECRET DOCUMENT');
-  expect(await query('summarize', new AbortController().signal)).toBe('summary');
+  expect(await query('summarize', new AbortController().signal)).toEqual({ answer: 'summary' });
 
   const isolated = createQuery(process.cwd(), async ctx => {
     expect(ctx.messages).toHaveLength(1);
@@ -210,7 +220,7 @@ test('full inheritance forks messages and loaded context while none isolates bot
     return response([{ type: 'text', text: 'isolated' }]);
   }, undefined, 0, undefined, undefined, undefined,
   { systemPrompt: 'top', messages: [{ role: 'user', content: 'do not inherit', timestamp: 1 }] }, 'SECRET');
-  expect(await isolated('review', new AbortController().signal, { inherit: 'none' })).toBe('isolated');
+  expect(await isolated('review', new AbortController().signal, { inherit: 'none' })).toEqual({ answer: 'isolated' });
 });
 test('second nested query in a multi-tool turn inherits no partial assistant turn', async () => {
   const inherited: Context['messages'] = [];
@@ -223,11 +233,11 @@ test('second nested query in a multi-tool turn inherits no partial assistant tur
     }
     if (ctx.messages.at(-1)?.role === 'toolResult') return response([{ type: 'text', text: 'parent answer' }]);
     return response([
-      { type: 'toolCall', id: 'first', name: 'exec', arguments: { code: 'print(await llm_query("nested"))' } },
-      { type: 'toolCall', id: 'second', name: 'exec', arguments: { code: 'print(await llm_query("nested"))' } },
+      { type: 'toolCall', id: 'first', name: 'exec', arguments: { code: 'print((await llm_query("nested")).answer)' } },
+      { type: 'toolCall', id: 'second', name: 'exec', arguments: { code: 'print((await llm_query("nested")).answer)' } },
     ]);
   }, { remaining: 3 });
-  expect(await query('root', new AbortController().signal)).toBe('parent answer');
+  expect(await query('root', new AbortController().signal)).toEqual({ answer: 'parent answer' });
   expect(nested).toBe(2);
   expect(inherited.filter(message => message.role === 'assistant')).toHaveLength(0);
   expect(inherited.filter(message => message.role === 'toolResult')).toHaveLength(0);
@@ -240,9 +250,9 @@ test('children recursively invoke children with a shared call budget', async () 
     calls++;
     if (ctx.messages.at(-1)?.content === 'nested') return response([{ type: 'text', text: 'child answer' }]);
     if (ctx.messages.length > 1) return response([{ type: 'text', text: 'parent answer' }]);
-    return response([{ type: 'toolCall', id: '1', name: 'exec', arguments: { code: 'print(await llm_query("nested"))' } }]);
+    return response([{ type: 'toolCall', id: '1', name: 'exec', arguments: { code: 'print((await llm_query("nested")).answer)' } }]);
   }, { remaining: 2 });
-  expect(await query('root', new AbortController().signal)).toBe('parent answer');
+  expect(await query('root', new AbortController().signal)).toEqual({ answer: 'parent answer' });
   expect(calls).toBe(3);
   await expect(query('again', new AbortController().signal)).rejects.toThrow('budget exhausted');
 });
