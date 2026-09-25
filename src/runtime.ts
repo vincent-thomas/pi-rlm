@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { readLimits } from './limits.ts';
 import { Worker } from 'node:worker_threads';
 import { bash } from './bash.ts';
-import type { QueryOptions } from './rlm.ts';
+import type { QueryOptions, QueryResult } from './rlm.ts';
 import { Scratchpad } from './scratchpad.ts';
 import { gitPreflight, validateClaims } from './git-preflight.ts';
 
-export type Query = (prompt: string, signal: AbortSignal, options?: QueryOptions) => Promise<string>;
+export type Query = (prompt: string, signal: AbortSignal, options?: QueryOptions) => Promise<QueryCompletion>;
+/** Internal completion; Runtime adds journal metadata after the append succeeds. */
+export type QueryCompletion = Pick<QueryResult, 'answer' | 'verification'>;
 export interface ExecResult { text: string; isError: boolean }
 
 /** A terminable worker keeps runaway JavaScript from blocking pi's event loop. */
@@ -18,14 +20,16 @@ export class Runtime {
   private journalWrites: Promise<void> = Promise.resolve();
   private resultId = 0;
 
-  private saveResult(prompt: string, requestedModel: string, result: string) {
-    const record = { id: ++this.resultId, prompt, requestedModel, result, completedAt: new Date().toISOString() };
+  private async saveResult(prompt: string, requestedModel: string, result: QueryCompletion): Promise<QueryResult> {
+    const id = String(++this.resultId);
+    const record = { id, prompt, requestedModel, result: result.answer, completedAt: new Date().toISOString(), ...(result.verification === undefined ? {} : { verification: result.verification }) };
     const write = this.journalWrites.then(async () => {
       this.resultsPath ??= join(await mkdtemp(join(tmpdir(), 'pi-rlm-results-')), 'results.jsonl');
       await appendFile(this.resultsPath, JSON.stringify(record) + '\n', { mode: 0o600 });
     });
     this.journalWrites = write.catch(() => {});
-    return write;
+    await write;
+    return { ...result, journal: { path: this.resultsPath!, id } };
   }
   private cancel?: (reason: string) => void;
   private termination: Promise<void> = Promise.resolve();
@@ -87,7 +91,7 @@ export class Runtime {
         if (message.type === 'query' || message.type === 'bash' || message.type === 'scratchpadRead' || message.type === 'scratchpadEdit' || message.type === 'gitPreflight' || message.type === 'validateClaims') {
           const type = message.type === 'bash' ? 'bashResult' : message.type === 'query' ? 'queryResult' : message.type === 'gitPreflight' || message.type === 'validateClaims' ? 'gitResult' : 'scratchpadResult';
           try {
-            const result = message.type === 'bash'
+            let result = message.type === 'bash'
               ? await bash(message.command, this.cwd, controller.signal)
               : message.type === 'query'
                 ? await query(message.prompt, controller.signal, message.options)
@@ -98,7 +102,7 @@ export class Runtime {
                     : message.type === 'gitPreflight'
                       ? await gitPreflight(this.cwd, controller.signal)
                       : await validateClaims(this.cwd, controller.signal, message.claims);
-            if (!done && message.type === 'query') await this.saveResult(message.prompt, message.options?.model ?? 'smart', result as string);
+            if (!done && message.type === 'query') result = await this.saveResult(message.prompt, message.options?.model ?? 'smart', result as Awaited<ReturnType<Query>>);
             if (!done) worker.postMessage({ type, id: message.id, result, resultsPath: this.resultsPath });
           } catch (error) {
             if (!done) worker.postMessage({ type, id: message.id, error: String(error) });

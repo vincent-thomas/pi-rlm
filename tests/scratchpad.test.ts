@@ -83,7 +83,7 @@ test('scratchpad is shared through child and grandchild llm_query runtimes', asy
     return response([{ type: 'text', text: 'done' }]);
   };
   const query = createQuery(process.cwd(), complete, { remaining: 2 }, 0, 4, undefined, pad);
-  expect(await query('root', new AbortController().signal)).toBe('done');
+  expect(await query('root', new AbortController().signal)).toEqual({ answer: 'done' });
   expect(await pad.read()).toBe('grandchild');
 });
 

@@ -71,7 +71,7 @@ test('disabled workflow deadline still permits cancellation', async () => {
   const ready = new Promise<void>(resolve => { started = resolve; });
   const running = r.exec('await llm_query("wait")', async () => {
     started();
-    return new Promise<string>(() => {});
+    return new Promise<{ answer: string }>(() => {});
   }, controller.signal);
   await ready;
   controller.abort();
@@ -85,7 +85,7 @@ test('configured workflow deadline is applied', async () => {
 
 test('completed child results survive worker timeout and can be recovered', async () => {
   const r = runtime();
-  const first = await r.exec('state.answer = await llm_query("task: private context"); print(resultsPath)', async () => 'valuable answer');
+  const first = await r.exec('state.answer = await llm_query("task: private context"); print(resultsPath)', async () => ({ answer: 'valuable answer' }));
   expect(first.isError).toBe(false);
   expect(first.text.trim()).toBe(r.resultsPath!);
   const record = JSON.parse((await readFile(r.resultsPath!, 'utf8')).trim());
@@ -101,10 +101,29 @@ test('completed child results survive worker timeout and can be recovered', asyn
 
 test('parallel completed results produce separate valid journal records', async () => {
   const r = runtime();
-  await r.exec('await Promise.all([llm_query("a"), llm_query("b")])', async p => p);
+  await r.exec('await Promise.all([llm_query("a"), llm_query("b")])', async p => ({ answer: p }));
   const records = (await readFile(r.resultsPath!, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   expect(records.map(r => r.result).sort()).toEqual(['a', 'b']);
   expect(new Set(records.map(r => r.id)).size).toBe(2);
+});
+
+test('parallel llm_query journal IDs identify their own answers', async () => {
+  const r = runtime();
+  const response = await r.exec(
+    'print(JSON.stringify(await Promise.all([llm_query("a"), llm_query("b")])))',
+    async p => ({ answer: p }),
+  );
+  expect(response.isError).toBe(false);
+  const results = JSON.parse(response.text) as Array<{ answer: string; journal: { path: string; id: string } }>;
+  expect(results.map(result => result.answer)).toEqual(['a', 'b']);
+  expect(new Set(results.map(result => result.journal.id)).size).toBe(2);
+  expect(results.every(result => result.journal.path === r.resultsPath)).toBe(true);
+  const records = (await readFile(r.resultsPath!, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  for (const result of results) {
+    const matching = records.filter(record => record.id === result.journal.id);
+    expect(matching).toHaveLength(1);
+    expect(matching[0].result).toBe(result.answer);
+  }
 });
 
 test('per-request timeout aborts providers even when they ignore the signal', async () => {
@@ -135,7 +154,7 @@ test('configured child budget is shared across calls', async () => {
   process.env.PI_RLM_MAX_CALLS = '1';
   const query = createQuery(process.cwd(), async () => answer());
   const signal = new AbortController().signal;
-  expect(await query('one', signal)).toBe('done');
+  expect(await query('one', signal)).toEqual({ answer: 'done' });
   await expect(query('two', signal)).rejects.toThrow('budget exhausted');
 });
 
@@ -147,7 +166,7 @@ test('a workflow can catch a request timeout and continue', async () => {
     return answer();
   });
   const result = await runtime().exec(
-    'try { await llm_query("slow") } catch (e) { print(String(e)) } print(await llm_query("next"))', query);
+    'try { await llm_query("slow") } catch (e) { print(String(e)) } print((await llm_query("next")).answer)', query);
   expect(result.isError).toBe(false);
   expect(result.text).toContain('request timed out');
   expect(result.text).toContain('done');
