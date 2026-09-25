@@ -56,6 +56,8 @@ const sandbox = createContext({
     } finally { activeReads--; }
   },
   bash: command => request('bash', { command }),
+  gitPreflight: () => request('gitPreflight', {}),
+  validateClaims: claims => request('validateClaims', { claims }),
   scratchpad: Object.freeze({
     read: (offset = 0, len = 16000) => request('scratchpadRead', { offset, len }),
     edit: (oldText, newText) => {
@@ -85,18 +87,21 @@ const sandbox = createContext({
         !Array.isArray(verification.checks) || verification.checks.length < 1 || verification.checks.length > 16 ||
         verification.checks.some(check => typeof check !== 'string' || !check.trim() || check.length > 2048) ||
         !Number.isFinite(verification.maxAttempts) || !Number.isInteger(verification.maxAttempts) || verification.maxAttempts < 1 || verification.maxAttempts > 10 ||
-        !Number.isFinite(verification.timeoutMs) || !Number.isInteger(verification.timeoutMs) || verification.timeoutMs < 1 || verification.timeoutMs > 3600000)) {
-      return locallyRejected(new Error('llm_query options.verification requires checks (1..16 nonblank strings, at most 2048 characters each), maxAttempts (integer 1..10), and timeoutMs (integer 1..3600000).'));
+        !Number.isFinite(verification.timeoutMs) || !Number.isInteger(verification.timeoutMs) || verification.timeoutMs < 1 || verification.timeoutMs > 3600000 ||
+        (verification.concurrency !== undefined && (verification.concurrency === null || typeof verification.concurrency !== 'object' || Array.isArray(verification.concurrency) ||
+          verification.concurrency.independentReadOnly !== true || !Number.isInteger(verification.concurrency.maxConcurrent) ||
+          verification.concurrency.maxConcurrent < 2 || verification.concurrency.maxConcurrent > 4)))) {
+      return locallyRejected(new Error('llm_query options.verification requires checks (1..16 nonblank strings, at most 2048 characters each), maxAttempts (integer 1..10), and timeoutMs (integer 1..3600000); optional concurrency requires independentReadOnly: true and maxConcurrent (integer 2..4).'));
     }
     return request('query', { prompt, options: {
       model: options.model ?? 'smart',
       inherit: options.inherit ?? 'full',
-      ...(verification === undefined ? {} : { verification: { checks: [...verification.checks], maxAttempts: verification.maxAttempts, timeoutMs: verification.timeoutMs } }),
+      ...(verification === undefined ? {} : { verification: { checks: [...verification.checks], maxAttempts: verification.maxAttempts, timeoutMs: verification.timeoutMs, ...(verification.concurrency === undefined ? {} : { concurrency: { maxConcurrent: verification.concurrency.maxConcurrent, independentReadOnly: true } }) } }),
     } });
   },
 });
 parentPort.on('message', async message => {
-  if (message.type === 'queryResult' || message.type === 'bashResult' || message.type === 'scratchpadResult') {
+  if (message.type === 'queryResult' || message.type === 'bashResult' || message.type === 'scratchpadResult' || message.type === 'gitResult') {
     if (message.resultsPath) sandbox.resultsPath = message.resultsPath;
     const waiter = pending.get(message.id);
     pending.delete(message.id);
@@ -109,7 +114,7 @@ parentPort.on('message', async message => {
   output = ''; truncated = false;
   try {
     await new Script(`(async () => {\n${message.code}\n})()`, { filename: 'rlm-exec.js' }).runInContext(sandbox);
-    if (pending.size || activeReads) throw new Error('Await every bash, readFile, scratchpad operation, and llm_query call before ending the cell.');
+    if (pending.size || activeReads) throw new Error('Await every bash, readFile, scratchpad, git helper, and llm_query call before ending the cell.');
     parentPort.postMessage({ type: 'result', text: output + (truncated ? '\n[Output truncated; print smaller slices.]' : ''), isError: false });
   } catch (error) {
     parentPort.postMessage({ type: 'result', text: output + '\n' + String(error), isError: true, reset: pending.size > 0 || activeReads > 0 });

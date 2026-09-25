@@ -56,6 +56,27 @@ print(state.decision);
 
 Each child has its own JavaScript workspace. By default it forks the caller's visible conversation and loaded `context`; pass `{ inherit: 'none' }` for a fresh, isolated child. Task-specific excerpts belong directly in the prompt. A child can inspect or edit repository files, run checks, and recursively delegate within its scope. Only its requested bounded final answer returns to the parent; detailed material should remain in its workspace, logs, or result journal.
 
+### Opt-in Git preflight and claim consistency
+
+In a delegated worker's `exec` cell, request compact local Git metadata before coordinating work:
+
+```js
+const p = await gitPreflight();
+print({ branch: p.branch, head: p.head, dirtyCount: p.dirtyCount, dirtyPaths: p.dirtyPaths,
+  omittedDirtyPaths: p.omittedDirtyPaths, worktrees: p.worktrees });
+const check = await validateClaims({ branch: p.branch, head: p.head,
+  pr: { number: 15, url: 'https://github.com/owner/repo/pull/15', headBranch: p.branch } });
+print(check);
+```
+
+These helpers run in pi's working directory and **do not** stash, reset, create worktrees, push or contact GitHub. Preflight includes tracked/untracked (not ignored) paths and caps displayed dirty paths at 20 and worktrees at 10, returning counts for omitted entries. It may reveal file names and can fail on enormous or unavailable Git repositories. `validateClaims` compares a full commit SHA and branch to local Git and checks a PR number against the number in a canonical GitHub PR URL; it cannot verify the remote PR's identity, state, code quality or test outcomes. A passing schema/consistency check is **not evidence that the claims are true**. For remote PR state, run a separate deterministic `gh pr view` check.
+
+### Recursive activity timing
+
+The activity snapshots and tool display record metadata-only elapsed milliseconds for each child: modelMs times awaited provider requests (including timeout or cancellation); execMs times JavaScript exec calls; verificationMs times optional verification rounds. Values accumulate per call and across calls, including failed or aborted phases. durationMs remains each call's end-to-end elapsed wall time. Nested child model time can overlap a parent's execMs, and parallel calls overlap each other: never add phase totals to infer task wall-clock time or exclusive CPU time. Rendering rounds to whole milliseconds. No prompts, answers, code, logs, or check output are added to activity.
+
+To benchmark throughput, fix a representative workload and acceptance checks, then compare current routing with explicitly selected routine and inherit: none for independent, self-contained checks and Promise.all for genuinely parallel work. Record externally measured task start-to-finish p50/p95, correctness/review defects, cancellation and timeout rates, call counts, and activity phase totals over repeated runs. Keep the always-delegate policy and default tier unchanged; change routing only if end-to-end time improves without reducing quality. Provider latency varies, and phase totals alone are not a controlled speed benchmark.
+
 ### Model tiers
 
 On session start, the extension selects the `smart` tier for the top-level orchestrator. `llm_query` also defaults to `smart` when its model option is omitted. Child model defaults are defined in `MODEL_TIERS`: `routine` uses `gpt-6-luna` with `low` reasoning, `smart` uses `gpt-6-sol` with `medium` reasoning, and `agi` uses `gpt-6-astra` with `high` reasoning. Override either lower tier with an exact model reference (optionally suffixed with a reasoning level, such as `:high`; without a suffix, the provider's reasoning default applies):
@@ -69,7 +90,7 @@ A requested lower tier uses its default when the corresponding environment varia
 
 This is model guidance, not an automatic runtime router. The selected top-level model delegates every repository or artifact inspection, implementation, debugging step, test, deterministic check, ordinary verification, and review. There is no exception for easy or trivial actions. Its direct work is limited to decomposition, acceptance criteria, orchestration, ambiguity or conflict resolution, consequential judgment, and concise final synthesis.
 
-Use routine for mechanical work, focused searches, bounded extraction, deterministic checks, and report consolidation; smart for implementation, debugging, independent review, or bounded multi-step reasoning; and agi only for genuine architecture, ambiguity, conflict, or consequential judgment. Substantive changes require a separate delegated reviewer, independent of the implementer. Workers retain authority to inspect, edit, test, verify, and recursively delegate inside their scope.
+Use routine for mechanical work, focused searches, bounded extraction, deterministic checks, and report consolidation; smart for implementation, debugging, independent review, or bounded multi-step reasoning; and agi only for genuine architecture, ambiguity, conflict, or consequential judgment. Substantive changes require a separate delegated reviewer, independent of the implementer. Workers retain authority to inspect, edit, test, verify, and recursively delegate inside their scope. For lower-latency orchestration, prefer routine for narrow deterministic delegation, use `inherit: 'none'` when the prompt is self-contained, and run independent child calls concurrently with `Promise.all` while awaiting them all. Keep the always-delegate rule and independent review; these heuristics have not been shown to improve task completion time.
 
 The top level uses `exec` only to launch and coordinate child calls, retain private state, and print compact decision records. It does not inspect repository sources, diffs, logs, or test output with `bash` or `readFile`. Never print whole files, diffs, logs, command output, or unbounded child reports. Keep those details in child workspaces, `state`, journals, or logs; ask a cheap child to consolidate large or multiple reports. A decision record should contain only status, changed paths or artifacts, acceptance-check results, independent-review findings, unresolved risks or conflicts, and decisions needed, with evidence locations rather than raw evidence. Every delegation should define its objective, scope, acceptance criteria, output bound, evidence requirements, and stopping rule. For example, delegate bounded semantic extraction:
 
@@ -117,7 +138,7 @@ llm_query accepts an optional verification policy in addition to model:
       },
     );
 
-When verification is present, all three fields are required. checks must contain 1–16 nonblank command strings (up to 2,048 characters each), maxAttempts is an integer from 1–10, and timeoutMs is an integer from 1–3,600,000. The timeout applies separately to each check. Checks run sequentially from pi's current working directory only after a child emits a terminal response, and the complete list runs on every round. A successful response requires every check to exit zero.
+When verification is present, all three fields are required. checks must contain 1–16 nonblank command strings (up to 2,048 characters each), maxAttempts is an integer from 1–10, and timeoutMs is an integer from 1–3,600,000. The timeout applies separately to each check. Checks run sequentially by default from pi's current working directory only after a child emits a terminal response, and the complete list runs on every round. To opt into at most four simultaneous checks, add concurrency: { maxConcurrent: 2, independentReadOnly: true } to verification. This is an explicit assertion that every check is independent, read-only, and safe to run at the same time; the extension cannot infer that from shell commands. Concurrent failures are reported in input order with a zero-based check index, regardless of completion order. On cancellation, all started checks are aborted and awaited, and no pending checks start. Keep the default for checks that mutate shared state or depend on order. A successful response requires every check to exit zero.
 
 After a failed round, the same child conversation and workspace continue with machine feedback containing only the failed command, its numeric exit status, `timeout`, or `error` status, and stdout/stderr log paths. `error` means the check could not be launched or completed normally; its log paths may be unavailable. Raw command output remains in those logs. Exhausting maxAttempts rejects the call rather than returning the last unverified answer. Parent cancellation and workflow deadlines terminate an active command and suppress retries. Verification settings apply only to that call; nested llm_query calls must request their own verification explicitly.
 
